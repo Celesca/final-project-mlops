@@ -2,3 +2,4 @@ dataset/
 venv/
 __pycache__/
 *.csv
+.env
