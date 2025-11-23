@@ -1,5 +1,4 @@
-dataset/
-venv/
+logs/
+*/logs/
 __pycache__/
-*.csv
-.env
+*.log
