@@ -51,3 +51,13 @@ class FraudTransaction(BaseModel):
     transaction_data: Dict
     fraud_probability: float
     prediction_time: str
+
+
+class LoadModelRequest(BaseModel):
+    """Request model for loading a model artifact from a filesystem path.
+
+    The `model_path` should point to a file that `joblib.load` can read
+    (for example a model saved by MLflow or joblib). This endpoint does not
+    attempt to download from remote MLflow registries — pass a local path.
+    """
+    model_path: str

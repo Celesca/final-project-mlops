@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 import logging
 
-from model_serving.schemas import Transaction, PredictionResponse, FraudTransaction
+from model_serving.schemas import Transaction, PredictionResponse, FraudTransaction, LoadModelRequest
 import model_serving.db as db
 from model_serving.model import FraudDetectionModel
 import model_serving.preprocessing as preprocessing
@@ -127,6 +127,33 @@ async def predict_fraud(transaction: Transaction):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction error: {e}")
+
+
+@app.post("/load_model")
+async def load_model(req: LoadModelRequest):
+    """Load a model from the given filesystem path into the running app.
+
+    This endpoint expects a local filesystem path that the server process
+    can access (for example a model artifact exported from MLflow). It will
+    call `FraudDetectionModel.load` to replace the in-memory model.
+    """
+    try:
+        model: FraudDetectionModel = getattr(app.state, "model")
+        if model is None:
+            # Create a model instance but do not auto-load a default path
+            model = FraudDetectionModel(model_path=None)
+
+        # Attempt to load the provided path
+        model.load(req.model_path)
+        app.state.model = model
+        logger.info("Loaded model from %s", req.model_path)
+        return {"message": "Model loaded", "model_path": req.model_path}
+    except FileNotFoundError:
+        logger.exception("Model file not found: %s", req.model_path)
+        raise HTTPException(status_code=404, detail=f"Model file not found: {req.model_path}")
+    except Exception as e:
+        logger.exception("Failed to load model from %s", req.model_path)
+        raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
 
 
 @app.get("/frauds", response_model=List[FraudTransaction])
