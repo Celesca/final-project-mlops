@@ -2,3 +2,8 @@ logs/
 */logs/
 __pycache__/
 *.log
+# Ignore all data files
+*.csv
+/data/
+/*/data/
+/**/data/**
