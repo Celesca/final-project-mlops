@@ -1,5 +1,9 @@
-dataset/
-venv/
+logs/
+*/logs/
 __pycache__/
+*.log
+# Ignore all data files
 *.csv
-.env
+/data/
+/*/data/
+/**/data/**
