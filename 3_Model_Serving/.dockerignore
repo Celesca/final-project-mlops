@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.env
+# DO NOT EXCLUDE models/ - needed for model inference
+# models/
+/*.db
+dist/
+build/
+/.git
+tests/
+*.md
