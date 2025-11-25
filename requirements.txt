@@ -6,3 +6,4 @@ numpy
 kagglehub
 apache-airflow
 pyarrow
+requests

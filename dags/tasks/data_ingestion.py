@@ -85,5 +85,10 @@ def ingest_daily_slice(ds, **kwargs):
     except Exception as exc:
         print(f"⚠️ Failed to store transactions in DB: {exc}")
 
-    return daily_df
+    return {
+        "record_count": len(daily_df),
+        "csv_path": csv_output_path,
+        "parquet_path": parquet_output_path,
+        "ingest_date": ds,
+    }
 

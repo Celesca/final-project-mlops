@@ -20,6 +20,9 @@ FRAUD_DB_CONFIG = {
     "password": os.getenv("FRAUD_DB_PASSWORD", "fraud123"),
 }
 
+# Model serving API configuration
+MODEL_SERVING_BASE_URL = os.getenv("MODEL_SERVING_BASE_URL", "http://host.docker.internal:8000")
+
 # DAG configuration
 DAG_START_DATE = "2025-11-23"  # The anchor date for simulation
 

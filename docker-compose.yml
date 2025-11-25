@@ -8,11 +8,13 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    PYTHONPATH: /opt/airflow
     FRAUD_DB_HOST: fraud-db
     FRAUD_DB_PORT: 5432
     FRAUD_DB_NAME: frauddb
     FRAUD_DB_USER: fraud
     FRAUD_DB_PASSWORD: fraud123
+    MODEL_SERVING_BASE_URL: http://model-serving:8000
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -61,7 +63,7 @@ services:
   pgadmin:
     image: dpage/pgadmin4:8
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@local
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "5050:80"
@@ -113,7 +115,51 @@ services:
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
 
+  model-serving:
+    build:
+      context: ./3_Model_Serving
+    environment:
+      FRAUD_DB_HOST: fraud-db
+      FRAUD_DB_PORT: 5432
+      FRAUD_DB_NAME: frauddb
+      FRAUD_DB_USER: fraud
+      FRAUD_DB_PASSWORD: fraud123
+      MLFLOW_TRACKING_URI: http://mlflow-server:5000
+      MLFLOW_EXPERIMENT: fraud_detection_serving
+      BASELINE_SAMPLE_SIZE: "5000"
+      MODEL_IMPROVEMENT_DELTA: "0.0"
+      MASTER_TABLE_LIMIT: "0"
+    depends_on:
+      fraud-db:
+        condition: service_healthy
+      mlflow-server:
+        condition: service_started
+    volumes:
+      - ./3_Model_Serving/models:/app/models
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  mlflow-server:
+    image: ghcr.io/mlflow/mlflow:latest
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri sqlite:////mlflow/mlflow.db
+        --default-artifact-root /mlruns
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow-server:5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlruns:/mlruns
+      - mlflow-backend:/mlflow
+    restart: unless-stopped
+
 volumes:
   postgres-db-volume:
   fraud-db-volume:
   pgadmin-data:
+  mlruns:
+  mlflow-backend:

@@ -15,6 +15,7 @@ from dags.tasks.database_setup import setup_prediction_database
 from dags.tasks.data_preparation import prepare_partitions
 from dags.tasks.data_ingestion import ingest_daily_slice
 from dags.tasks.drift_detection import check_data_drift
+from dags.tasks.model_serving import trigger_model_retrain, score_daily_predictions
 
 # Default arguments for the DAG
 default_args = {
@@ -59,6 +60,18 @@ with DAG(
         python_callable=check_data_drift,
     )
     
+    # Task 4: Trigger retrain if drift detected
+    task_trigger_retrain = PythonOperator(
+        task_id="trigger_model_retrain",
+        python_callable=trigger_model_retrain,
+    )
+    
+    # Task 5: Score daily data via model serving and store predictions
+    task_score_predictions = PythonOperator(
+        task_id="score_daily_predictions",
+        python_callable=score_daily_predictions,
+    )
+    
     # Set task dependencies
-    # Database Setup -> Partitioning -> Daily Ingestion -> Drift Detection
-    task_setup_db >> task_prepare_partitions >> task_ingest_daily >> task_check_drift
+    # Database Setup -> Partitioning -> Daily Ingestion -> Drift Detection -> Retrain -> Score
+    task_setup_db >> task_prepare_partitions >> task_ingest_daily >> task_check_drift >> task_trigger_retrain >> task_score_predictions
