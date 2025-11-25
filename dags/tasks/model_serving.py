@@ -10,7 +10,12 @@ import pandas as pd
 import requests
 
 from dags.config import MODEL_SERVING_BASE_URL
-from dags.utils.database import save_prediction
+from dags.utils.database import (
+    save_prediction,
+    save_transaction_record,
+    build_transaction_key,
+    get_transaction_lookup_for_ingest,
+)
 
 
 def _chunk_records(records: List[Dict[str, Any]], chunk_size: int = 200) -> Iterable[List[Dict[str, Any]]]:
@@ -63,6 +68,13 @@ def score_daily_predictions(ds, **context) -> Dict[str, Any]:
         print("⚠️ Daily dataframe is empty; skipping prediction step.")
         return {"scored_rows": 0}
 
+    ingest_date = ingestion_output.get("ingest_date")
+    if not ingest_date:
+        raise ValueError("Ingest date missing; cannot map predictions to transactions.")
+
+    tx_lookup = get_transaction_lookup_for_ingest(ingest_date)
+    lookup_misses = 0
+
     records = df.to_dict(orient="records")
     print(f"📦 Sending {len(records)} records (from {source_used}) to /predict")
 
@@ -83,14 +95,27 @@ def score_daily_predictions(ds, **context) -> Dict[str, Any]:
                 continue  # Can't score correctness without label
             prediction = bool(item.get("prediction", 0))
             predict_proba = float(item.get("predict_proba", 0.0))
+            tx_key = build_transaction_key(item, ingest_date=ingest_date)
+            transaction_id = tx_lookup.get(tx_key)
+            if transaction_id is None:
+                transaction_id = save_transaction_record(
+                    transaction=item,
+                    ingest_date=ingest_date,
+                    source_file=source_used,
+                )
+                tx_lookup[tx_key] = transaction_id
+                lookup_misses += 1
+
             save_prediction(
-                transaction=item,
+                transaction_id=transaction_id,
                 prediction=prediction,
                 actual_label=bool(actual_label),
                 predict_proba=predict_proba,
             )
             stored_predictions += 1
 
+    if lookup_misses:
+        print(f"ℹ️ Added {lookup_misses} missing transactions while storing predictions.")
     print(f"✅ Scored {total_scored} rows; stored {stored_predictions} labelled predictions.")
     return {
         "scored_rows": total_scored,

@@ -6,9 +6,9 @@ This module handles:
 2. Correct predictions table (TP and TN cases)
 3. Incorrect predictions table (FP and FN cases with predict_proba)
 """
-import json
-from typing import Dict, Optional, List, Any
-from datetime import datetime
+from decimal import Decimal
+from typing import Dict, Optional, List, Any, Tuple
+from datetime import datetime, date
 from contextlib import contextmanager
 
 import psycopg2
@@ -74,7 +74,7 @@ def init_prediction_db(_: Optional[Any] = None) -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS correct_predictions (
                 id SERIAL PRIMARY KEY,
-                transaction_data JSONB NOT NULL,
+                transaction_id INTEGER NOT NULL REFERENCES all_transactions(id) ON DELETE CASCADE,
                 prediction INTEGER NOT NULL,
                 actual_label INTEGER NOT NULL,
                 prediction_time TIMESTAMPTZ NOT NULL,
@@ -86,7 +86,7 @@ def init_prediction_db(_: Optional[Any] = None) -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS incorrect_predictions (
                 id SERIAL PRIMARY KEY,
-                transaction_data JSONB NOT NULL,
+                transaction_id INTEGER NOT NULL REFERENCES all_transactions(id) ON DELETE CASCADE,
                 prediction INTEGER NOT NULL,
                 actual_label INTEGER NOT NULL,
                 predict_proba DOUBLE PRECISION NOT NULL,
@@ -105,10 +105,18 @@ def init_prediction_db(_: Optional[Any] = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_correct_predictions_time 
             ON correct_predictions(prediction_time)
         """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_correct_predictions_transaction 
+            ON correct_predictions(transaction_id)
+        """)
         
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_incorrect_predictions_time 
             ON incorrect_predictions(prediction_time)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_incorrect_predictions_transaction 
+            ON incorrect_predictions(transaction_id)
         """)
         
         cursor.execute("""
@@ -120,7 +128,7 @@ def init_prediction_db(_: Optional[Any] = None) -> None:
 
 
 def save_prediction(
-    transaction: Dict,
+    transaction_id: int,
     prediction: bool,
     actual_label: bool,
     predict_proba: float,
@@ -130,18 +138,20 @@ def save_prediction(
     Save a prediction result to the appropriate table based on correctness.
     
     Args:
-        transaction: Transaction data dictionary
+        transaction_id: Foreign key to the stored transaction
         prediction: Model prediction (True/False for is_fraud)
         actual_label: Actual label (True/False for is_fraud)
         predict_proba: Probability score from model
         prediction_time: ISO timestamp (defaults to current time)
     """
+    if transaction_id is None:
+        raise ValueError("transaction_id is required to save a prediction record.")
+
     if prediction_time is None:
         prediction_time = datetime.utcnow().isoformat()
     
     pred_int = 1 if prediction else 0
     actual_int = 1 if actual_label else 0
-    transaction_json = json.dumps(transaction)
     is_correct = (prediction == actual_label)
     
     with get_cursor(commit=True) as cursor:
@@ -149,19 +159,19 @@ def save_prediction(
             cursor.execute(
                 """
                 INSERT INTO correct_predictions 
-                (transaction_data, prediction, actual_label, prediction_time)
+                (transaction_id, prediction, actual_label, prediction_time)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (transaction_json, pred_int, actual_int, prediction_time),
+                (transaction_id, pred_int, actual_int, prediction_time),
             )
         else:
             cursor.execute(
                 """
                 INSERT INTO incorrect_predictions 
-                (transaction_data, prediction, actual_label, predict_proba, prediction_time)
+                (transaction_id, prediction, actual_label, predict_proba, prediction_time)
                 VALUES (%s, %s, %s, %s, %s)
                 """,
-                (transaction_json, pred_int, actual_int, float(predict_proba), prediction_time),
+                (transaction_id, pred_int, actual_int, float(predict_proba), prediction_time),
             )
 
 
@@ -179,6 +189,78 @@ MASTER_TX_COLUMNS = [
     "isFlaggedFraud",
 ]
 
+TRANSACTION_KEY_COLUMNS = [
+    "ingest_date",
+    "step",
+    "type",
+    "amount",
+    "nameOrig",
+    "nameDest",
+    "oldbalanceOrg",
+    "oldbalanceDest",
+    "newbalanceOrig",
+    "newbalanceDest",
+]
+
+TRANSACTION_RESULT_COLUMNS = MASTER_TX_COLUMNS + ["ingest_date", "source_file"]
+
+
+def _alias_column(column: str, table_alias: str = "at") -> str:
+    db_column = column if column.islower() else column.lower()
+    return f'{table_alias}.{db_column} AS "{column}"'
+
+
+TRANSACTION_RESULT_SELECT = ", ".join(_alias_column(col) for col in TRANSACTION_RESULT_COLUMNS)
+TRANSACTION_LOOKUP_SELECT = ", ".join(_alias_column(col) for col in TRANSACTION_KEY_COLUMNS)
+
+
+def _normalize_key_value(value: Any):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        return _normalize_key_value(value.item())
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value
+
+
+def build_transaction_key(transaction: Dict[str, Any], ingest_date: Optional[str] = None) -> Tuple[Any, ...]:
+    """
+    Build a deterministic key for mapping transactions back to their DB row.
+    """
+    key_parts: List[Any] = []
+    for column in TRANSACTION_KEY_COLUMNS:
+        if column == "ingest_date":
+            key_parts.append(_normalize_key_value(transaction.get(column, ingest_date)))
+            continue
+        key_parts.append(_normalize_key_value(transaction.get(column)))
+    return tuple(key_parts)
+
+
+def get_transaction_lookup_for_ingest(ingest_date: str) -> Dict[Tuple[Any, ...], int]:
+    """
+    Build a lookup table of transaction keys -> database IDs for a given ingest date.
+    """
+    query = f"""
+        SELECT at.id, {TRANSACTION_LOOKUP_SELECT}
+        FROM all_transactions at
+        WHERE at.ingest_date = %s
+    """
+    with get_cursor(dict_cursor=True) as cursor:
+        cursor.execute(query, (ingest_date,))
+        rows = cursor.fetchall()
+
+    lookup: Dict[Tuple[Any, ...], int] = {}
+    for row in rows:
+        lookup[build_transaction_key(row)] = row["id"]
+    return lookup
+
 
 def _extract_master_row(transaction: Dict) -> List:
     """Extract ordered column values for master table."""
@@ -195,9 +277,9 @@ def save_transaction_record(
     transaction: Dict,
     ingest_date: str,
     source_file: Optional[str] = None,
-) -> None:
+) -> int:
     """
-    Persist a raw transaction into the all_transactions table.
+    Persist a raw transaction into the all_transactions table and return its ID.
     """
     row = _extract_master_row(transaction)
     row.extend([ingest_date, source_file])
@@ -211,9 +293,12 @@ def save_transaction_record(
                 ingest_date, source_file
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             row,
         )
+        new_id = cursor.fetchone()[0]
+    return new_id
 
 
 def save_transactions_bulk(
@@ -260,10 +345,18 @@ def get_correct_predictions(
     Returns:
         List of dictionaries with prediction records
     """
-    query = """
-        SELECT id, transaction_data, prediction, actual_label, prediction_time, created_at
-        FROM correct_predictions
-        ORDER BY prediction_time DESC
+    query = f"""
+        SELECT 
+            cp.id,
+            cp.transaction_id,
+            cp.prediction,
+            cp.actual_label,
+            cp.prediction_time,
+            cp.created_at,
+            {TRANSACTION_RESULT_SELECT}
+        FROM correct_predictions cp
+        JOIN all_transactions at ON at.id = cp.transaction_id
+        ORDER BY cp.prediction_time DESC
     """
     params: List[Any] = []
     if limit:
@@ -278,7 +371,8 @@ def get_correct_predictions(
     for row in rows:
         result.append({
             "id": row["id"],
-            "transaction_data": row["transaction_data"] or {},
+            "transaction_id": row["transaction_id"],
+            "transaction_data": {col: row.get(col) for col in TRANSACTION_RESULT_COLUMNS},
             "prediction": bool(row["prediction"]),
             "actual_label": bool(row["actual_label"]),
             "prediction_time": row["prediction_time"],
@@ -362,10 +456,19 @@ def get_incorrect_predictions(
     Returns:
         List of dictionaries with prediction records including predict_proba
     """
-    query = """
-        SELECT id, transaction_data, prediction, actual_label, predict_proba, prediction_time, created_at
-        FROM incorrect_predictions
-        ORDER BY prediction_time DESC
+    query = f"""
+        SELECT 
+            ip.id,
+            ip.transaction_id,
+            ip.prediction,
+            ip.actual_label,
+            ip.predict_proba,
+            ip.prediction_time,
+            ip.created_at,
+            {TRANSACTION_RESULT_SELECT}
+        FROM incorrect_predictions ip
+        JOIN all_transactions at ON at.id = ip.transaction_id
+        ORDER BY ip.prediction_time DESC
     """
     params: List[Any] = []
     if limit:
@@ -380,7 +483,8 @@ def get_incorrect_predictions(
     for row in rows:
         result.append({
             "id": row["id"],
-            "transaction_data": row["transaction_data"] or {},
+            "transaction_id": row["transaction_id"],
+            "transaction_data": {col: row.get(col) for col in TRANSACTION_RESULT_COLUMNS},
             "prediction": bool(row["prediction"]),
             "actual_label": bool(row["actual_label"]),
             "predict_proba": row["predict_proba"],

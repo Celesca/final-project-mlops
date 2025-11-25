@@ -10,7 +10,7 @@ from dags.utils.database import save_prediction, init_prediction_db, get_predict
 
 
 def store_prediction_result(
-    transaction: Dict,
+    transaction_id: int,
     prediction: bool,
     actual_label: bool,
     predict_proba: float,
@@ -24,21 +24,15 @@ def store_prediction_result(
     - Routes incorrect predictions (FP, FN) to incorrect_predictions table with predict_proba
     
     Args:
-        transaction: Transaction data dictionary (all fields from Transaction schema)
+        transaction_id: ID of the transaction stored in all_transactions
         prediction: Model prediction (True/False for is_fraud)
         actual_label: Actual label from ground truth (True/False for is_fraud)
         predict_proba: Probability score from model (0.0 to 1.0)
         prediction_time: Optional ISO timestamp (defaults to current UTC time)
     
     Example:
-        >>> transaction = {
-        ...     "transac_type": "CASH_OUT",
-        ...     "amount": 1000.0,
-        ...     "src_bal": 5000.0,
-        ...     "src_new_bal": 4000.0
-        ... }
         >>> store_prediction_result(
-        ...     transaction=transaction,
+        ...     transaction_id=123,
         ...     prediction=True,
         ...     actual_label=True,  # TP case
         ...     predict_proba=0.85
@@ -51,7 +45,7 @@ def store_prediction_result(
         pass  # Database might already exist
     
     save_prediction(
-        transaction=transaction,
+        transaction_id=transaction_id,
         prediction=prediction,
         actual_label=actual_label,
         predict_proba=predict_proba,
