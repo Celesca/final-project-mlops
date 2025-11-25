@@ -15,7 +15,7 @@ The easiest way to run the API is using Docker, which packages all dependencies 
 
 **Step 1: Navigate to the API directory**
 ```bash
-cd 3_Model_API
+cd 3_Model_Serving
 ```
 
 **Step 2: Build and start the container**
@@ -67,14 +67,14 @@ FileNotFoundError: [Errno 2] No such file or directory: 'models/xgb_model.joblib
    jupyter notebook 2_Model_Training.ipynb
    ```
 
-2. The notebook will automatically save artifacts to `3_Model_API/models/`
+2. The notebook will automatically save artifacts to `3_Model_Serving/models/`
 
 3. Rebuild and restart Docker:
-   ```bash
-   cd 3_Model_API
-   docker-compose down
-   docker-compose up --build
-   ```
+```bash
+cd 3_Model_Serving
+docker-compose down
+docker-compose up --build
+```
 
 **To test without a trained model** (development only):
 - Skip Docker and run locally with `python server.py`
@@ -86,45 +86,30 @@ FileNotFoundError: [Errno 2] No such file or directory: 'models/xgb_model.joblib
 ## 📋 Features
 
 ### API Endpoints
-- **POST /predict** - Real-time fraud detection with ML model inference
-  - Accepts transaction details (amount, type, account balances)
-  - Returns fraud prediction with probability score (0.0 - 1.0)
-  - Smart routing: Auto-marks low-risk types (PAYMENT, CASH_IN, DEBIT) as non-fraud
-  - ML prediction for high-risk types (CASH_OUT, TRANSFER)
-  - Automatic fraud record persistence for detected frauds
+- **POST /train** - Train a new model using the latest master table snapshot
+  - Pulls data directly from the `all_transactions` Postgres table (no payload required)
+  - Logs every training run to the local MLflow server
+  - Automatically promotes the run to “serving” if its validation AUC improves on the current best model
 
-- **GET /frauds** - Retrieve fraud history
-  - Returns all transactions previously flagged as fraudulent
-  - Includes transaction data, fraud probability, and prediction timestamp
-  - Sortable by database ID (auto-increment)
+- **POST /predict** - Batch inference endpoint
+  - Accepts a list of transactions (same schema as `all_transactions`)
+  - Returns the original payload with two additional columns: `predict_proba` and `prediction`
+  - Uses the currently promoted model (initially the pre-trained artifact)
 
-- **DELETE /frauds** - Clear fraud database
-  - Deletes all fraud records from the database
-  - Returns count of deleted records
-  - Useful for testing and maintenance
+- **GET /** and **GET /docs**
+  - Health/status summary and interactive Swagger UI
 
-- **GET /** - API health check
-  - Returns API version and available endpoints
-  - Quick status verification
-
-- **GET /docs** - Interactive API documentation
-  - Auto-generated Swagger UI
-  - Live API testing interface
-  - Schema exploration and examples
-
-### Machine Learning
+### Machine Learning & Experiment Tracking
 - **XGBoost Classifier** - Production-ready fraud detection model
   - Trained on historical transaction patterns
   - Binary classification (fraud/legitimate)
   - Probability scores for risk assessment
+- **MLflow integration**
+  - Local MLflow tracking server (via docker-compose) to log runs, metrics, and artifacts
+  - Automatic model promotion when validation AUC improves
+  - Persisted metadata (`models/best_model_meta.json`) keeps track of the best serving model
 
 ### Data Management
-- **SQLite Database** - Lightweight persistent storage
-  - Auto-created on startup
-  - No configuration required
-  - Fraud transaction logging with full payload
-  - Timestamp tracking for audit trails
-
 - **Pydantic Validation** - Request/response data integrity
   - Type-safe transaction models
   - Automatic validation with clear error messages
@@ -132,16 +117,14 @@ FileNotFoundError: [Errno 2] No such file or directory: 'models/xgb_model.joblib
   - Optional fields for flexible integration
 
 ### Infrastructure
-- **Docker Support** - Containerized deployment
-  - Pre-configured Dockerfile and docker-compose
-  - Consistent environment across development/production
-  - Easy scaling and orchestration
-
-- **Logging System** - Comprehensive request/response tracking
-  - Structured logging with timestamps and severity levels
-  - Request logging (transaction details)
-  - Prediction logging (fraud decisions and probabilities)
-  - Error tracking and debugging support
+- **Docker Support**
+  - Compose stack now ships with:
+    - `scb-fraud-model-api` (FastAPI service)
+    - `fraud-db` (Postgres master table)
+    - `mlflow-server` (local MLflow UI + tracking backend)
+  - Persistent named volumes for the Postgres DB and MLflow artifacts/metadata
+- **Logging System**
+  - Structured logs for training jobs, promotions, and inference batches
 
 - **Load Testing Ready** - Performance validation
   - Locust integration with realistic CSV data
@@ -162,11 +145,10 @@ FileNotFoundError: [Errno 2] No such file or directory: 'models/xgb_model.joblib
 ├── .dockerignore                       # Docker build exclusions
 │
 ├── model_serving/                      # Core application modules
-│   ├── schemas.py                      # Pydantic models (Transaction, Response schemas)
+│   ├── schemas.py                      # Pydantic request/response schemas
 │   ├── model.py                        # ML model wrapper and inference logic
 │   ├── preprocessing.py                # Feature engineering and transformation
-│   ├── db.py                           # SQLite database operations
-│   └── frauds.db                       # SQLite database (auto-created)
+│   └── data_access.py                  # Postgres helper for the master table
 │
 ├── models/                             # Trained ML artifacts
 │   ├── xgb_model.joblib                # Serialized XGBoost model
@@ -183,24 +165,19 @@ FileNotFoundError: [Errno 2] No such file or directory: 'models/xgb_model.joblib
 
 **`server.py`**
 - FastAPI application initialization
-- API endpoint definitions (predict, frauds, docs)
-- Startup event handlers (DB init, model loading)
-- Request/response logging configuration
-- Business logic for transaction type routing
+- `/train` + `/predict` endpoints
+- Startup event handlers (model/artifact loading, baseline evaluation)
+- MLflow logging + model promotion logic
 
 **`model_serving/schemas.py`**
-- `Transaction` - Input model with validation
-- `PredictionResponse` - Prediction output format
-- `FraudTransaction` - Database record schema
-- `TRANSAC_TYPE` - Transaction type enum
-- OpenAPI examples for documentation
+- `MasterTransaction`, `TrainRequest`, `PredictRequest`, `EnrichedTransaction` schemas
+- `TRANSAC_TYPE` enum for validation / preprocessing alignment
 
 **`model_serving/model.py`**
 - `FraudDetectionModel` class
 - Model loading from joblib artifacts
 - Prediction logic (XGBoost Booster and sklearn interfaces)
-- Error handling and logging
-- No fallback heuristics (model required)
+- Batch probability helper for evaluation/baseline metrics
 
 **`model_serving/preprocessing.py`**
 - `transform_transaction()` - Feature engineering pipeline
@@ -209,15 +186,14 @@ FileNotFoundError: [Errno 2] No such file or directory: 'models/xgb_model.joblib
 - Feature scaling and column alignment
 - Handles enum values from Pydantic
 
-**`model_serving/db.py`**
-- `init_db()` - Create frauds table
-- `save_fraud_to_db()` - Insert fraud record
-- `get_all_frauds()` - Retrieve all frauds
-- `clear_frauds()` - Delete all records
+**`model_serving/data_access.py`**
+- Helper to connect to Postgres (`all_transactions`) using env vars
+- Pandas-friendly fetchers for training + evaluation
 
 **`models/` Directory**
 - Generated by the training notebook (`2_Model_Training.ipynb`)
 - Contains all artifacts needed for inference
+- Stores `best_model_meta.json` describing the currently promoted model
 - Must be present for model-based predictions
 
 **`tests/locustfile.py`**
@@ -242,19 +218,6 @@ This opens the **Swagger UI** where you can:
 - View all endpoints and their schemas
 - Test endpoints directly in the browser
 - See request/response examples
-
----
-
-## 📊 Database Schema
-
-The SQLite database (`frauds.db`) stores fraudulent transactions with the following schema:
-
-| Column             | Type    | Description                              |
-|--------------------|---------|------------------------------------------|
-| id                 | INTEGER | Primary key (auto-increment)             |
-| transaction_data   | TEXT    | Full transaction JSON                    |
-| fraud_probability  | REAL    | Fraud probability score (0.0 to 1.0)     |
-| prediction_time    | TEXT    | ISO timestamp of prediction              |
 
 ---
 

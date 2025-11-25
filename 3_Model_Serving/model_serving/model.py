@@ -117,3 +117,31 @@ class FraudDetectionModel:
         else:
             data = dict(transaction)
         return self.predict(data)
+
+    def predict_probabilities(self, features: pd.DataFrame) -> np.ndarray:
+        """
+        Batch probability inference for evaluation/training utilities.
+        """
+        if self.model is None:
+            raise RuntimeError("No model loaded")
+
+        df = self._to_dataframe(features)
+
+        if self._has_proba:
+            probs = self.model.predict_proba(df)
+            probs = np.asarray(probs)
+            if probs.ndim == 1:
+                return probs
+            if probs.shape[1] >= 2:
+                return probs[:, 1]
+            return probs.ravel()
+
+        if self._is_xgb_booster:
+            import xgboost as xgb
+
+            dmat = xgb.DMatrix(df.values, feature_names=list(df.columns))
+            preds = self.model.predict(dmat)
+            return np.asarray(preds).ravel()
+
+        preds = self.model.predict(df)
+        return np.asarray(preds).ravel()

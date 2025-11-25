@@ -7,12 +7,18 @@ pydantic
 pandas
 numpy
 
+# Database
+psycopg2-binary
+
 # Model serving
 scikit-learn
 xgboost
 
 # Model serialization
 joblib
+
+# Experiment tracking
+mlflow
 
 # Testing
 locust

@@ -1,177 +1,248 @@
 from fastapi import FastAPI, HTTPException
-from typing import List
+from typing import List, Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
 import os
+import json
 import logging
 
-from model_serving.schemas import Transaction, PredictionResponse, FraudTransaction, LoadModelRequest
-import model_serving.db as db
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.metrics import roc_auc_score
+
 from model_serving.model import FraudDetectionModel
-import model_serving.preprocessing as preprocessing
+from model_serving import preprocessing, data_access, training
+from model_serving.schemas import (
+    TrainRequest,
+    TrainResponse,
+    PredictRequest,
+    EnrichedTransaction,
+    MasterTransaction,
+)
 
 app = FastAPI(
     title="Fraud Detection API",
-    description="REST API for real-time fraud detection and fraud transaction retrieval",
-    version="1.0.0",
+    description="REST API for fraud model training and inference with MLflow tracking",
+    version="2.0.0",
 )
 
-# Configure a module logger
 logger = logging.getLogger("fraud_api")
 if not logger.handlers:
-    # simple console handler if not configured by uvicorn
     handler = logging.StreamHandler()
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = BASE_DIR / "models"
+MODEL_DIR.mkdir(exist_ok=True)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "frauds.db")
+CANONICAL_MODEL_PATH = MODEL_DIR / "xgb_model.joblib"
+ARTIFACTS_PATH = MODEL_DIR / "preprocessing_artifacts.joblib"
+TRAIN_COLS_PATH = MODEL_DIR / "train_cols.json"
+META_PATH = MODEL_DIR / "best_model_meta.json"
+
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+MLFLOW_EXPERIMENT = os.getenv("MLFLOW_EXPERIMENT", "fraud_detection_serving")
+MASTER_TABLE_LIMIT = int(os.getenv("MASTER_TABLE_LIMIT", "0"))
+BASELINE_SAMPLE_SIZE = int(os.getenv("BASELINE_SAMPLE_SIZE", "5000"))
+MODEL_IMPROVEMENT_DELTA = float(os.getenv("MODEL_IMPROVEMENT_DELTA", "0.0"))
+
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database, load preprocessing artifacts and the model on startup."""
-    # Initialize DB
-    try:
-        db.init_db()
-        logger.info("Database initialized at %s", DB_PATH)
-    except Exception:
-        logger.exception("Failed to initialize database")
-
-    # Load preprocessing artifacts (may be None if not present)
-    try:
-        artifacts = preprocessing.load_preprocessing_artifacts()
-        logger.info("Preprocessing artifacts loaded: %s", "yes" if artifacts else "no")
-    except Exception:
-        artifacts = None
-        logger.exception("Failed to load preprocessing artifacts")
-
-    # Instantiate model (constructor may auto-load default path)
+    """Load artifacts and model; establish baseline metric if possible."""
+    artifacts = preprocessing.load_preprocessing_artifacts(ARTIFACTS_PATH.as_posix())
     model = FraudDetectionModel()
-    # If model not loaded, try explicit load to capture errors in logs
-    if model.model is None and model.model_path:
+    if model.model is None and CANONICAL_MODEL_PATH.exists():
         try:
-            model.load(model.model_path)
-            logger.info("Model loaded from %s", model.model_path)
+            model.load(CANONICAL_MODEL_PATH.as_posix())
+            logger.info("Loaded model from %s", CANONICAL_MODEL_PATH)
         except Exception:
-            logger.exception("Failed to load model from %s", model.model_path)
-    else:
-        logger.info("Model loaded: %s", "yes" if model.model is not None else "no")
+            logger.exception("Failed to load model from %s", CANONICAL_MODEL_PATH)
 
-    # Attach to app.state for handlers to access
+    meta = _load_model_meta()
+    best_metric = meta.get("val_auc") if meta else None
+
+    if best_metric is None and artifacts and model.model is not None:
+        try:
+            baseline = _evaluate_against_master(model, artifacts, BASELINE_SAMPLE_SIZE)
+            if baseline is not None:
+                best_metric = baseline
+                _save_model_meta({"val_auc": baseline, "run_id": "bootstrap"})
+                logger.info("Baseline AUC established at %.4f", baseline)
+        except Exception:
+            logger.exception("Failed to compute baseline metric")
+
     app.state.artifacts = artifacts
     app.state.model = model
+    app.state.best_metric = best_metric
 
 
 @app.get("/")
 async def root():
     return {
         "message": "Fraud Detection API is running",
-        "version": "1.0.0",
-        "endpoints": ["POST /predict", "GET /frauds", "DELETE /frauds", "GET /docs"],
+        "version": "2.0.0",
+        "endpoints": [
+            "POST /train",
+            "POST /predict",
+            "GET /docs",
+        ],
     }
 
 
-@app.post("/predict", response_model=PredictionResponse)
-async def predict_fraud(transaction: Transaction):
+@app.post("/train", response_model=TrainResponse)
+async def train_endpoint(_: TrainRequest | None = None):
     try:
-        artifacts = getattr(app.state, "artifacts", None)
-        model: FraudDetectionModel = getattr(app.state, "model")
+        master_limit = MASTER_TABLE_LIMIT if MASTER_TABLE_LIMIT > 0 else None
+        master_df = data_access.fetch_master_transactions(limit=master_limit)
+        if master_df.empty:
+            raise HTTPException(status_code=400, detail="No data available for training")
 
+        logger.info("Training on %d master rows from Postgres", len(master_df))
+
+        result = training.train_new_model(
+            master_df,
+            tracking_uri=MLFLOW_TRACKING_URI,
+            experiment_name=MLFLOW_EXPERIMENT,
+        )
+
+        promoted = _maybe_promote_model(result)
+        message = (
+            "New model promoted as serving model"
+            if promoted
+            else "Model logged to MLflow but not promoted (metric not improved)"
+        )
+
+        return TrainResponse(
+            run_id=result.run_id,
+            val_auc=result.metrics["val_auc"],
+            val_accuracy=result.metrics["val_accuracy"],
+            promoted=promoted,
+            model_path=CANONICAL_MODEL_PATH.as_posix() if promoted else None,
+            message=message,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Training failed")
+        raise HTTPException(status_code=500, detail=f"Training failed: {exc}")
+
+
+@app.post("/predict", response_model=List[EnrichedTransaction])
+async def predict_endpoint(request: PredictRequest):
+    if not request.new_data:
+        raise HTTPException(status_code=400, detail="new_data must not be empty")
+
+    artifacts = getattr(app.state, "artifacts", None)
+    model: FraudDetectionModel = getattr(app.state, "model", None)
+
+    if artifacts is None:
+        raise HTTPException(status_code=500, detail="Preprocessing artifacts are unavailable")
+    if model is None or model.model is None:
+        raise HTTPException(status_code=500, detail="Model is not loaded")
+
+    try:
+        payload_df = _payload_to_dataframe(request.new_data)
+        feature_source = preprocessing.build_feature_source_from_master(payload_df)
+        features, _ = preprocessing.prepare_feature_frame(feature_source, artifacts=artifacts, fit=False)
+        probs = model.predict_probabilities(features)
+        preds = (probs >= 0.5).astype(int)
+
+        enriched: List[EnrichedTransaction] = []
+        records = payload_df.to_dict(orient="records")
+        for record, prob, pred in zip(records, probs, preds):
+            enriched.append(
+                EnrichedTransaction(
+                    **record,
+                    predict_proba=float(prob),
+                    prediction=int(pred),
+                )
+            )
+        return enriched
+    except Exception as exc:
+        logger.exception("Prediction failed")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}")
+
+
+def _payload_to_dataframe(records: List[MasterTransaction]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+    rows = [record.dict() for record in records]
+    return pd.DataFrame(rows)
+
+
+def _maybe_promote_model(result: training.TrainingResult) -> bool:
+    candidate_metric = result.metrics.get("val_auc")
+    current_best = getattr(app.state, "best_metric", None)
+    improved = current_best is None or (candidate_metric > current_best + MODEL_IMPROVEMENT_DELTA)
+
+    if not improved:
         logger.info(
-            "Received transaction for prediction: dst_acc=%s amount=%s",
-            transaction.dst_acc,
-            transaction.amount,
+            "New model (AUC=%.4f) did not beat best metric %.4f",
+            candidate_metric,
+            current_best,
         )
+        return False
 
-        # Transform incoming transaction to model-ready features (DataFrame)
-        features_df = preprocessing.transform_transaction(transaction.dict(), artifacts)
+    joblib.dump(result.model, CANONICAL_MODEL_PATH)
+    joblib.dump(result.artifacts, ARTIFACTS_PATH)
+    if result.artifacts.get("train_cols"):
+        with open(TRAIN_COLS_PATH, "w", encoding="utf-8") as f:
+            json.dump(result.artifacts["train_cols"], f)
 
-        # Short-circuit: if the transaction type is not one of the two
-        # high-risk channels we care about (CASH_OUT, TRANSFER), skip the model
-        # and immediately mark as non-fraudulent.
-        try:
-            tt = getattr(transaction, "transac_type", None)
-            if tt is None:
-                tt_val = None
-            else:
-                # handle Enum members
-                tt_val = getattr(tt, "value", None) or str(tt)
-            if isinstance(tt_val, str):
-                tt_val = tt_val.strip().upper()
-        except Exception:
-            tt_val = None
-
-        if tt_val not in ("CASH_OUT", "TRANSFER"):
-            logger.info("Transaction transac_type=%s not high-risk; skipping model (marking not fraud)", tt_val)
-            is_fraud = False
-            fraud_probability = 0.0
-        else:
-            # Model inference: model.predict accepts DataFrame or dict
-            is_fraud, fraud_probability = model.predict(features_df)
-
-        prediction_time = datetime.utcnow().isoformat()
-
-        # Persist if fraud
-        if is_fraud:
-            db.save_fraud_to_db(transaction.dict(), fraud_probability, prediction_time)
-            logger.info("Persisted fraud record with prob=%.4f", fraud_probability)
-
-        logger.info("Prediction result: is_fraud=%s prob=%.4f", is_fraud, fraud_probability)
-
-        return PredictionResponse(
-            is_fraud=is_fraud,
-            fraud_probability=round(fraud_probability, 4),
-            prediction_time=prediction_time,
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction error: {e}")
+    _save_model_meta(
+        {
+            "val_auc": candidate_metric,
+            "run_id": result.run_id,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    )
+    app.state.best_metric = candidate_metric
+    app.state.artifacts = result.artifacts
+    app.state.model.load(CANONICAL_MODEL_PATH.as_posix())
+    logger.info("Promoted new model (AUC=%.4f) from run %s", candidate_metric, result.run_id)
+    return True
 
 
-@app.post("/load_model")
-async def load_model(req: LoadModelRequest):
-    """Load a model from the given filesystem path into the running app.
-
-    This endpoint expects a local filesystem path that the server process
-    can access (for example a model artifact exported from MLflow). It will
-    call `FraudDetectionModel.load` to replace the in-memory model.
-    """
-    try:
-        model: FraudDetectionModel = getattr(app.state, "model")
-        if model is None:
-            # Create a model instance but do not auto-load a default path
-            model = FraudDetectionModel(model_path=None)
-
-        # Attempt to load the provided path
-        model.load(req.model_path)
-        app.state.model = model
-        logger.info("Loaded model from %s", req.model_path)
-        return {"message": "Model loaded", "model_path": req.model_path}
-    except FileNotFoundError:
-        logger.exception("Model file not found: %s", req.model_path)
-        raise HTTPException(status_code=404, detail=f"Model file not found: {req.model_path}")
-    except Exception as e:
-        logger.exception("Failed to load model from %s", req.model_path)
-        raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
+def _load_model_meta() -> Optional[Dict[str, Any]]:
+    if META_PATH.exists():
+        with open(META_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
 
 
-@app.get("/frauds", response_model=List[FraudTransaction])
-async def get_frauds():
-    try:
-        records = db.get_all_frauds()
-        return [FraudTransaction(**r) for r in records]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+def _save_model_meta(meta: Dict[str, Any]) -> None:
+    with open(META_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
 
 
-@app.delete("/frauds")
-async def clear_frauds():
-    try:
-        deleted = db.clear_frauds()
-        return {"message": f"Deleted {deleted} fraud records"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+def _evaluate_against_master(
+    model: FraudDetectionModel,
+    artifacts: Dict[str, Any],
+    limit: int,
+) -> Optional[float]:
+    sample_limit = limit if limit > 0 else None
+    df = data_access.fetch_master_transactions(limit=sample_limit)
+    if df.empty or "isFraud" not in df.columns:
+        return None
+    labelled = df.dropna(subset=["isFraud"])
+    if labelled.empty:
+        return None
+
+    feature_source = preprocessing.build_feature_source_from_master(labelled)
+    features, _ = preprocessing.prepare_feature_frame(feature_source, artifacts=artifacts, fit=False)
+    probs = model.predict_probabilities(features)
+    labels = labelled["isFraud"].astype(int).values
+
+    if np.unique(labels).shape[0] < 2:
+        return None
+
+    auc = roc_auc_score(labels, probs)
+    return float(auc)
 
 
 if __name__ == "__main__":

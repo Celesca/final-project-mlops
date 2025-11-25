@@ -1,11 +1,25 @@
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import os
 
 import pandas as pd
 import joblib
-from .schemas import TRANSAC_TYPE, ALLOWED_TRANSAC_TYPES
+from sklearn.preprocessing import StandardScaler
 from enum import Enum as _Enum
+
+from .schemas import TRANSAC_TYPE, ALLOWED_TRANSAC_TYPES
+
+FEATURE_COLUMNS = [
+    "transac_type",
+    "amount",
+    "src_bal",
+    "src_new_bal",
+    "dst_bal",
+    "dst_new_bal",
+]
+
+NUMERIC_FEATURES = ["amount", "src_bal", "src_new_bal", "dst_bal", "dst_new_bal"]
+
 
 def parse_time_features(time_ind: str) -> Dict[str, Any]:
     try:
@@ -18,89 +32,30 @@ def parse_time_features(time_ind: str) -> Dict[str, Any]:
 
     return {"hour": dt.hour, "day_of_week": dt.weekday(), "parsed": True}
 
+
 def load_preprocessing_artifacts(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    # Resolve path relative to this file's directory if not provided
+    """Load persisted preprocessing artifacts from disk."""
     if path is None:
         parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         path = os.path.join(parent_dir, "models", "preprocessing_artifacts.joblib")
-    
+
     try:
         artifacts = joblib.load(path)
         return artifacts
     except Exception:
         return None
-    
-# Convert incoming JSON transaction to a 1-row DataFrame ready for model inference.
+
+
 def transform_transaction(transaction: Dict[str, Any], artifacts: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    
-    relevant_features = [
-        "transac_type",
-        "amount",
-        "src_bal",
-        "src_new_bal",
-        "dst_bal",
-        "dst_new_bal",
-    ]
-
-    # Build initial df from transaction dict
-    # Normalize transac_type to uppercase and validate
-    tt = transaction.get("transac_type")
-    if tt is not None:
-        # If the incoming value is an Enum member (from Pydantic), extract its value.
-        if isinstance(tt, _Enum):
-            tt_val = tt.value
-        else:
-            tt_val = tt
-
-        tt_norm = str(tt_val).strip().upper()
-        if tt_norm not in TRANSAC_TYPE.__members__:
-            raise ValueError(f"Invalid transac_type '{tt}'; allowed: {list(TRANSAC_TYPE)}")
-        # store the normalized string value so later code can treat it as a category
-        transaction["transac_type"] = tt_norm
-
-    row = {k: transaction.get(k, None) for k in relevant_features}
-    df = pd.DataFrame([row])
-
-    # Ensure transac_type uses the canonical categories so dummies are consistent
-    if "transac_type" in df.columns:
-        # ensure category order matches training
-        df["transac_type"] = pd.Categorical(df["transac_type"], categories=ALLOWED_TRANSAC_TYPES)
-
-    # One-hot encode transac_type (drop_first=True matches training notebook)
-    df = pd.get_dummies(df, columns=["transac_type"], drop_first=True)
-
-    # Align columns to training columns 
-    if artifacts and "train_cols" in artifacts and artifacts["train_cols"]:
-        train_cols = list(artifacts["train_cols"])  # expected order
-        for c in train_cols:
-            if c not in df.columns:
-                df[c] = 0
-        # If there are extra cols in df not in train_cols, drop them
-        extra = set(df.columns) - set(train_cols)
-        if extra:
-            df = df.drop(columns=list(extra))
-        # Reorder to train cols
-        df = df[train_cols]
-
-    # Scale numerical columns
-    scaler = artifacts.get("scaler") if artifacts else None
-    if scaler is not None:
-        num_cols = artifacts.get("numerical_cols") if artifacts and artifacts.get("numerical_cols") else df.select_dtypes(include=["number"]).columns.tolist()
-        num_cols = [c for c in num_cols if c in df.columns]
-        if num_cols:
-            try:
-                df[num_cols] = scaler.transform(df[num_cols])
-            except Exception:
-                df[num_cols] = df[num_cols].astype(float)
-    else:
-        num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-        for c in num_cols:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    return df
+    """Convert a single transaction dict into a feature-aligned dataframe."""
+    feature_row = _transaction_to_feature_row(transaction)
+    feature_df = pd.DataFrame([feature_row])
+    transformed, _ = prepare_feature_frame(feature_df, artifacts=artifacts, fit=False)
+    return transformed
 
 
 def transaction_to_features(transaction: Dict[str, Any]) -> Dict[str, Any]:
+    """Legacy helper that extracts a subset of scalar features from a transaction dict."""
     features: Dict[str, Any] = {}
     features["amount"] = transaction.get("amount")
 
@@ -115,3 +70,116 @@ def transaction_to_features(transaction: Dict[str, Any]) -> Dict[str, Any]:
     features["dst_acc"] = transaction.get("dst_acc")
 
     return features
+
+
+def build_feature_source_from_master(df: pd.DataFrame) -> pd.DataFrame:
+    """Map the master transaction table schema into the model feature schema."""
+    if df.empty:
+        return pd.DataFrame(columns=FEATURE_COLUMNS)
+
+    work = df.copy()
+    work.columns = [str(c) for c in work.columns]
+
+    def _coalesce(*cols):
+        for col in cols:
+            if col in work.columns:
+                return work[col]
+        return pd.Series([None] * len(work))
+
+    feature_df = pd.DataFrame()
+    feature_df["transac_type"] = _coalesce("transac_type", "type")
+    feature_df["amount"] = _coalesce("amount")
+    feature_df["src_bal"] = _coalesce("src_bal", "oldbalanceOrg")
+    feature_df["src_new_bal"] = _coalesce("src_new_bal", "newbalanceOrig")
+    feature_df["dst_bal"] = _coalesce("dst_bal", "oldbalanceDest")
+    feature_df["dst_new_bal"] = _coalesce("dst_new_bal", "newbalanceDest")
+
+    return feature_df[FEATURE_COLUMNS]
+
+
+def prepare_feature_frame(
+    df: pd.DataFrame,
+    artifacts: Optional[Dict[str, Any]] = None,
+    fit: bool = False,
+) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+    """
+    Apply one-hot encoding + scaling on the core feature frame.
+
+    When ``fit`` is True, new artifacts (scaler, column order) are created.
+    Otherwise the provided artifacts are used to align the columns and scale.
+    """
+    working = df.copy()
+
+    if working.empty:
+        return working, artifacts
+
+    if "transac_type" not in working.columns:
+        raise ValueError("Expected 'transac_type' column in feature dataframe")
+
+    working["transac_type"] = working["transac_type"].apply(_normalize_transac_type)
+    working["transac_type"] = pd.Categorical(
+        working["transac_type"], categories=ALLOWED_TRANSAC_TYPES
+    )
+    working = pd.get_dummies(working, columns=["transac_type"], drop_first=True)
+
+    if fit:
+        train_cols = list(working.columns)
+        num_cols = [c for c in NUMERIC_FEATURES if c in working.columns]
+        scaler = None
+        if num_cols:
+            scaler = StandardScaler()
+            working[num_cols] = scaler.fit_transform(working[num_cols].astype(float))
+        artifacts = {
+            "train_cols": train_cols,
+            "numerical_cols": num_cols,
+            "scaler": scaler,
+        }
+        return working, artifacts
+
+    if artifacts is None or not artifacts.get("train_cols"):
+        raise ValueError("Preprocessing artifacts are required for inference")
+
+    train_cols = list(artifacts["train_cols"])
+    for col in train_cols:
+        if col not in working.columns:
+            working[col] = 0
+    extra_cols = set(working.columns) - set(train_cols)
+    if extra_cols:
+        working = working.drop(columns=list(extra_cols))
+    working = working[train_cols]
+
+    scaler = artifacts.get("scaler")
+    if scaler is not None:
+        num_cols = artifacts.get("numerical_cols", [])
+        num_cols = [c for c in num_cols if c in working.columns]
+        if num_cols:
+            working[num_cols] = scaler.transform(working[num_cols].astype(float))
+    else:
+        for col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce")
+
+    return working, artifacts
+
+
+def _transaction_to_feature_row(transaction: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a transaction dict into the expected feature row schema."""
+    row: Dict[str, Any] = {}
+    t_type = transaction.get("transac_type") or transaction.get("type")
+    if isinstance(t_type, _Enum):
+        t_type = t_type.value
+    row["transac_type"] = _normalize_transac_type(t_type)
+    row["amount"] = transaction.get("amount")
+    row["src_bal"] = transaction.get("src_bal", transaction.get("oldbalanceOrg"))
+    row["src_new_bal"] = transaction.get("src_new_bal", transaction.get("newbalanceOrig"))
+    row["dst_bal"] = transaction.get("dst_bal", transaction.get("oldbalanceDest"))
+    row["dst_new_bal"] = transaction.get("dst_new_bal", transaction.get("newbalanceDest"))
+    return row
+
+
+def _normalize_transac_type(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip().upper()
+    if normalized and normalized not in TRANSAC_TYPE.__members__:
+        raise ValueError(f"Invalid transac_type '{value}'; allowed: {list(TRANSAC_TYPE)}")
+    return normalized
