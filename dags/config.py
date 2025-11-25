@@ -11,6 +11,15 @@ CSV_FILENAME = "PS_20174392719_1491204439457_log.csv"
 DATA_DIR = "/opt/airflow/data"
 PARTITIONED_DATA_DIR = os.path.join(DATA_DIR, "partitioned_data")
 
+# Database configuration (Postgres for master + prediction tables)
+FRAUD_DB_CONFIG = {
+    "host": os.getenv("FRAUD_DB_HOST", "fraud-db"),
+    "port": int(os.getenv("FRAUD_DB_PORT", "5432")),
+    "dbname": os.getenv("FRAUD_DB_NAME", "frauddb"),
+    "user": os.getenv("FRAUD_DB_USER", "fraud"),
+    "password": os.getenv("FRAUD_DB_PASSWORD", "fraud123"),
+}
+
 # DAG configuration
 DAG_START_DATE = "2025-11-23"  # The anchor date for simulation
 

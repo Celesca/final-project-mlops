@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime as dt
 from dags.config import DATA_DIR, PARTITIONED_DATA_DIR, DAG_START_DATE
 from dags.utils.dataset_utils import get_dataset_path
+from dags.utils.database import save_transactions_bulk
 
 
 def ingest_daily_slice(ds, **kwargs):
@@ -33,13 +34,17 @@ def ingest_daily_slice(ds, **kwargs):
     # Try to use partitioned data first (more efficient)
     partition_path = os.path.join(PARTITIONED_DATA_DIR, f"simulation_day={simulation_day}")
     
+    source_file = None
+
     if os.path.exists(partition_path):
         print(f"📂 Reading from partitioned data: {partition_path}")
         daily_df = pd.read_parquet(partition_path)
+        source_file = partition_path
     else:
         print("⚠️ Partitioned data not found, falling back to CSV...")
         csv_path = get_dataset_path()
         print(f"📂 Reading from CSV: {csv_path}")
+        source_file = csv_path
         
         # Calculate step range: 1 Day = 24 Steps
         start_step = (delta_days * 24) + 1
@@ -68,5 +73,17 @@ def ingest_daily_slice(ds, **kwargs):
     daily_df.to_parquet(parquet_output_path, compression='snappy', index=False)
     print(f"✅ Saved {len(daily_df)} rows to: {parquet_output_path}")
     
+    # Persist raw transactions into database for downstream analytics
+    try:
+        transactions_payload = daily_df.to_dict(orient="records")
+        save_transactions_bulk(
+            transactions=transactions_payload,
+            ingest_date=ds,
+            source_file=source_file,
+        )
+        print(f"🗄️ Stored {len(transactions_payload)} transactions for {ds} in the DB.")
+    except Exception as exc:
+        print(f"⚠️ Failed to store transactions in DB: {exc}")
+
     return daily_df
 

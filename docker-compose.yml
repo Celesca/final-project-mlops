@@ -8,6 +8,11 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    FRAUD_DB_HOST: fraud-db
+    FRAUD_DB_PORT: 5432
+    FRAUD_DB_NAME: frauddb
+    FRAUD_DB_USER: fraud
+    FRAUD_DB_PASSWORD: fraud123
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -17,6 +22,8 @@ x-airflow-common: &airflow-common
   depends_on:
     &airflow-common-depends-on
     postgres:
+      condition: service_healthy
+    fraud-db:
       condition: service_healthy
 
 services:
@@ -33,6 +40,37 @@ services:
       interval: 5s
       retries: 5
     restart: always
+
+  fraud-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud123
+      POSTGRES_DB: frauddb
+    volumes:
+      - fraud-db-volume:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud"]
+      interval: 10s
+      retries: 5
+      timeout: 5s
+    restart: always
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      fraud-db:
+        condition: service_healthy
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    restart: unless-stopped
 
   airflow-webserver:
     <<: *airflow-common
@@ -77,3 +115,5 @@ services:
 
 volumes:
   postgres-db-volume:
+  fraud-db-volume:
+  pgadmin-data:

@@ -11,6 +11,7 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 
 from dags.config import DAG_START_DATE
+from dags.tasks.database_setup import setup_prediction_database
 from dags.tasks.data_preparation import prepare_partitions
 from dags.tasks.data_ingestion import ingest_daily_slice
 from dags.tasks.drift_detection import check_data_drift
@@ -34,6 +35,12 @@ with DAG(
     tags=["fraud-detection", "kaggle", "data-ingestion"]
 ) as dag:
     
+    # Task 0: Setup database (runs first, idempotent)
+    task_setup_db = PythonOperator(
+        task_id="setup_prediction_database",
+        python_callable=setup_prediction_database,
+    )
+    
     # Task 1: Prepare partitioned data (runs once or periodically)
     task_prepare_partitions = PythonOperator(
         task_id="prepare_partitions",
@@ -53,5 +60,5 @@ with DAG(
     )
     
     # Set task dependencies
-    # Partitioning -> Daily Ingestion -> Drift Detection
-    task_prepare_partitions >> task_ingest_daily >> task_check_drift
+    # Database Setup -> Partitioning -> Daily Ingestion -> Drift Detection
+    task_setup_db >> task_prepare_partitions >> task_ingest_daily >> task_check_drift
