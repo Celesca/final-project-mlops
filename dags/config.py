@@ -1,0 +1,19 @@
+"""
+Configuration constants for the fraud detection DAG.
+"""
+import os
+
+# Dataset configuration
+DATASET_NAME = "sriharshaeedala/financial-fraud-detection-dataset"
+CSV_FILENAME = "PS_20174392719_1491204439457_log.csv"
+
+# Data paths
+DATA_DIR = "/opt/airflow/data"
+PARTITIONED_DATA_DIR = os.path.join(DATA_DIR, "partitioned_data")
+
+# DAG configuration
+DAG_START_DATE = "2025-11-23"  # The anchor date for simulation
+
+# Drift detection configuration
+DRIFT_THRESHOLD = 0.3  # 30% of columns can drift before alerting
+
