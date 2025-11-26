@@ -155,48 +155,53 @@ def prepare_feature_frame(
 
     scaler = artifacts.get("scaler")
     if scaler is not None:
-        expected_num_cols = list(artifacts.get("numerical_cols", []))
-
-        if not expected_num_cols:
-            logger.warning("No numerical_cols found in artifacts; skipping scaler transform")
+        # Use scaler's own feature names if available (most reliable)
+        if hasattr(scaler, "feature_names_in_"):
+            scaler_cols = list(scaler.feature_names_in_)
         else:
-            # Ensure the working frame has the same column names the scaler was fitted on.
-            # Support legacy and canonical numeric column names by attempting to map.
-            all_present = all(c in working.columns for c in expected_num_cols)
+            # Fallback to numerical_cols from artifacts
+            scaler_cols = list(artifacts.get("numerical_cols", []))
 
-            if not all_present:
-                # attempt mapping between legacy names and canonical names
-                legacy_map = {
-                    "src_bal": "oldbalanceOrg",
-                    "src_new_bal": "newbalanceOrig",
-                    "dst_bal": "oldbalanceDest",
-                    "dst_new_bal": "newbalanceDest",
-                }
+        if not scaler_cols:
+            logger.warning("No scaler feature columns found; skipping scaler transform")
+        else:
+            # Mapping between canonical names (in current data) and legacy names
+            canonical_to_legacy = {
+                "oldbalanceOrg": "src_bal",
+                "newbalanceOrig": "src_new_bal",
+                "oldbalanceDest": "dst_bal",
+                "newbalanceDest": "dst_new_bal",
+            }
+            legacy_to_canonical = {v: k for k, v in canonical_to_legacy.items()}
 
-                # For each expected column not present, try to populate it from a mapped column
-                for expected in expected_num_cols:
-                    if expected in working.columns:
+            # For each column the scaler needs, ensure it's present in working
+            for expected in scaler_cols:
+                if expected in working.columns:
+                    continue
+                # If expected is a legacy name (e.g. src_bal), try to get from canonical name
+                if expected in legacy_to_canonical:
+                    canonical_name = legacy_to_canonical[expected]
+                    if canonical_name in working.columns:
+                        working[expected] = working[canonical_name]
+                        logger.debug("Mapped %s -> %s for scaler", canonical_name, expected)
                         continue
-                    # try direct canonical -> present
-                    mapped = legacy_map.get(expected)
-                    if mapped and mapped in working.columns:
-                        working[expected] = working[mapped]
+                # If expected is a canonical name, try to get from legacy name
+                if expected in canonical_to_legacy:
+                    legacy_name = canonical_to_legacy[expected]
+                    if legacy_name in working.columns:
+                        working[expected] = working[legacy_name]
+                        logger.debug("Mapped %s -> %s for scaler", legacy_name, expected)
                         continue
-                    # try reverse mapping (expected is canonical but working has legacy)
-                    rev_map = {v: k for k, v in legacy_map.items()}
-                    mapped_rev = rev_map.get(expected)
-                    if mapped_rev and mapped_rev in working.columns:
-                        working[expected] = working[mapped_rev]
 
-                all_present = all(c in working.columns for c in expected_num_cols)
+            all_present = all(c in working.columns for c in scaler_cols)
 
             if all_present:
-                # Transform using the expected column order
-                working[expected_num_cols] = scaler.transform(working[expected_num_cols].astype(float))
+                # Transform using the scaler's expected column order
+                working[scaler_cols] = scaler.transform(working[scaler_cols].astype(float))
             else:
                 logger.warning(
                     "Scaler transform skipped because not all expected numeric columns are present: %s",
-                    expected_num_cols,
+                    scaler_cols,
                 )
     else:
         for col in working.columns:
