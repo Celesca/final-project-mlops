@@ -84,6 +84,7 @@ def _load_best_model_from_registry() -> Optional[Tuple[Any, Dict[str, Any], floa
     try:
         import mlflow
         from mlflow.tracking import MlflowClient
+        import tempfile
         
         client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
         model_name = "fraud-detection-xgboost"
@@ -106,9 +107,40 @@ def _load_best_model_from_registry() -> Optional[Tuple[Any, Dict[str, Any], floa
             model_uri = f"models:/{model_name}/Production"
             loaded_model = mlflow.sklearn.load_model(model_uri)
             
-            # Try to load artifacts from the run
+            # Load artifacts from the run
             run = client.get_run(latest_prod.run_id)
             artifacts = {}
+            
+            # Download artifacts from MLflow
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                # Download preprocessing artifacts
+                try:
+                    client.download_artifacts(
+                        run_id=latest_prod.run_id,
+                        path="preprocessing/preprocessing_artifacts.joblib",
+                        dst_path=tmp_dir
+                    )
+                    artifacts_path = os.path.join(tmp_dir, "preprocessing_artifacts.joblib")
+                    if os.path.exists(artifacts_path):
+                        artifacts = joblib.load(artifacts_path)
+                        logger.info("Loaded preprocessing artifacts from MLflow")
+                except Exception as e:
+                    logger.warning(f"Failed to load preprocessing artifacts from MLflow: {e}")
+                    # Try to get train_cols from JSON
+                    try:
+                        client.download_artifacts(
+                            run_id=latest_prod.run_id,
+                            path="preprocessing/train_cols.json",
+                            dst_path=tmp_dir
+                        )
+                        train_cols_path = os.path.join(tmp_dir, "train_cols.json")
+                        if os.path.exists(train_cols_path):
+                            with open(train_cols_path, "r") as f:
+                                train_cols = json.load(f)
+                            artifacts["train_cols"] = train_cols
+                            logger.info("Loaded train_cols from MLflow")
+                    except Exception as e2:
+                        logger.warning(f"Failed to load train_cols from MLflow: {e2}")
             
             # Extract metrics
             metric = run.data.metrics.get("val_auc", 0.0)
@@ -128,36 +160,139 @@ def _load_best_model_from_registry() -> Optional[Tuple[Any, Dict[str, Any], floa
         return None
 
 
+def _migrate_local_model_to_mlflow() -> bool:
+    """Migrate existing local model to MLflow Model Registry.
+    
+    This is called on first startup if no models exist in MLflow registry.
+    Loads the model from local files and registers it to MLflow.
+    
+    Returns:
+        bool: True if migration successful, False otherwise
+    """
+    if not CANONICAL_MODEL_PATH.exists():
+        logger.info("No local model found to migrate")
+        return False
+    
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        
+        logger.info("Migrating local model to MLflow Model Registry...")
+        
+        # Load local model and artifacts
+        local_model = joblib.load(CANONICAL_MODEL_PATH)
+        local_artifacts = None
+        if ARTIFACTS_PATH.exists():
+            local_artifacts = joblib.load(ARTIFACTS_PATH)
+        
+        # Setup MLflow
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT)
+        
+        # Get baseline metric from metadata
+        meta = _load_model_meta()
+        baseline_auc = meta.get("val_auc", 0.0) if meta else 0.0
+        
+        # Register model in MLflow
+        model_name = "fraud-detection-xgboost"
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        
+        with mlflow.start_run(run_name=f"migration-{timestamp}") as run:
+            # Log metrics
+            mlflow.log_metrics({"val_auc": baseline_auc, "val_accuracy": 0.0})
+            
+            # Log artifacts
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                # Save model
+                tmp_model_path = os.path.join(tmp_dir, "xgb_model.joblib")
+                joblib.dump(local_model, tmp_model_path)
+                mlflow.log_artifact(tmp_model_path, artifact_path="model_artifacts")
+                
+                # Save preprocessing artifacts if available
+                if local_artifacts:
+                    tmp_artifacts_path = os.path.join(tmp_dir, "preprocessing_artifacts.joblib")
+                    joblib.dump(local_artifacts, tmp_artifacts_path)
+                    mlflow.log_artifact(tmp_artifacts_path, artifact_path="preprocessing")
+                    
+                    # Save train_cols as JSON if available
+                    if local_artifacts.get("train_cols"):
+                        tmp_cols_path = os.path.join(tmp_dir, "train_cols.json")
+                        with open(tmp_cols_path, "w") as f:
+                            json.dump(local_artifacts["train_cols"], f)
+                        mlflow.log_artifact(tmp_cols_path, artifact_path="preprocessing")
+            
+            # Register model
+            model_version = mlflow.sklearn.log_model(
+                local_model,
+                artifact_path="sklearn-model",
+                registered_model_name=model_name
+            )
+            
+            # Transition to Production
+            client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
+            client.transition_model_version_stage(
+                name=model_name,
+                version=str(model_version.version),
+                stage="Production"
+            )
+            
+            logger.info(f"Successfully migrated local model to MLflow as {model_name}/{model_version.version}")
+            return True
+            
+    except ImportError:
+        logger.error("MLflow not available, cannot migrate model")
+        return False
+    except Exception as e:
+        logger.exception(f"Failed to migrate local model to MLflow: {e}")
+        return False
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Load artifacts and model; establish baseline metric if possible.
+    """Load artifacts and model from MLflow Model Registry.
     
-    Tries to load from MLflow Model Registry first, falls back to local files.
+    On first startup, migrates existing local models to MLflow if needed.
     """
-    artifacts = preprocessing.load_preprocessing_artifacts(ARTIFACTS_PATH.as_posix())
     model = FraudDetectionModel()
+    artifacts = None
+    best_metric = None
     
     # Try to load best model from MLflow Model Registry
     registry_result = _load_best_model_from_registry()
     if registry_result:
         registry_model, registry_artifacts, registry_metric = registry_result
-        # Use registry model if available, but still prefer local artifacts if they exist
-        if registry_artifacts:
-            artifacts = registry_artifacts
         model.model = registry_model
+        artifacts = registry_artifacts
         best_metric = registry_metric
-        logger.info("Using Production model from MLflow Model Registry")
-    elif model.model is None and CANONICAL_MODEL_PATH.exists():
-        # Fallback to local model
-        try:
-            model.load(CANONICAL_MODEL_PATH.as_posix())
-            logger.info("Loaded model from %s", CANONICAL_MODEL_PATH)
-        except Exception:
-            logger.exception("Failed to load model from %s", CANONICAL_MODEL_PATH)
-
-    meta = _load_model_meta()
-    best_metric = meta.get("val_auc") if meta else None
-
+        logger.info("Loaded Production model from MLflow Model Registry")
+    else:
+        # No model in registry - try to migrate from local files
+        logger.info("No model found in MLflow registry, attempting to migrate local model...")
+        if _migrate_local_model_to_mlflow():
+            # Retry loading from registry after migration
+            registry_result = _load_best_model_from_registry()
+            if registry_result:
+                registry_model, registry_artifacts, registry_metric = registry_result
+                model.model = registry_model
+                artifacts = registry_artifacts
+                best_metric = registry_metric
+                logger.info("Loaded migrated model from MLflow Model Registry")
+            else:
+                logger.error("Failed to load model after migration")
+        else:
+            logger.warning("No model available in MLflow registry and migration failed")
+    
+    # If still no artifacts, try to load from local (for backward compatibility during migration)
+    if not artifacts:
+        artifacts = preprocessing.load_preprocessing_artifacts(ARTIFACTS_PATH.as_posix())
+    
+    # Get metric from metadata if not from registry
+    if best_metric is None:
+        meta = _load_model_meta()
+        best_metric = meta.get("val_auc") if meta else None
+    
+    # Establish baseline if needed
     if best_metric is None and artifacts and model.model is not None:
         try:
             baseline = _evaluate_against_master(model, artifacts, BASELINE_SAMPLE_SIZE)
@@ -317,20 +452,26 @@ def _maybe_promote_model(result: training.TrainingResult) -> bool:
         )
         return False
 
-    # Save model locally
-    joblib.dump(result.model, CANONICAL_MODEL_PATH)
-    joblib.dump(result.artifacts, ARTIFACTS_PATH)
-    if result.artifacts.get("train_cols"):
-        with open(TRAIN_COLS_PATH, "w", encoding="utf-8") as f:
-            json.dump(result.artifacts["train_cols"], f)
-
-    # Transition model to Production stage in MLflow Model Registry
+    # Transition model to Production stage in MLflow Model Registry (no local file saving)
     if result.model_version:
         try:
             _transition_model_to_production(result.model_version)
         except Exception as e:
             logger.warning(f"Failed to transition model to Production in MLflow: {e}")
+            return False  # Fail if we can't register to MLflow
+    else:
+        logger.error("Model version not available, cannot promote to Production")
+        return False
 
+    # Load model from MLflow registry for serving
+    registry_result = _load_best_model_from_registry()
+    if not registry_result:
+        logger.error("Failed to load promoted model from MLflow registry")
+        return False
+    
+    registry_model, registry_artifacts, _ = registry_result
+    
+    # Save metadata (but not model files - models are in MLflow only)
     _save_model_meta(
         {
             "val_auc": candidate_metric,
@@ -340,10 +481,11 @@ def _maybe_promote_model(result: training.TrainingResult) -> bool:
             "training_date": datetime.utcnow().strftime("%Y-%m-%d"),  # Store training date for drift detection
         }
     )
+    
     app.state.best_metric = candidate_metric
-    app.state.artifacts = result.artifacts
-    app.state.model.load(CANONICAL_MODEL_PATH.as_posix())
-    logger.info("Promoted new model (AUC=%.4f) from run %s", candidate_metric, result.run_id)
+    app.state.artifacts = registry_artifacts if registry_artifacts else result.artifacts
+    app.state.model.model = registry_model
+    logger.info("Promoted new model (AUC=%.4f) from run %s to MLflow Production", candidate_metric, result.run_id)
     return True
 
 
