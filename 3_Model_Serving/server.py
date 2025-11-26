@@ -167,12 +167,13 @@ async def train_endpoint(_: TrainRequest | None = None):
             experiment_name=MLFLOW_EXPERIMENT,
         )
 
-        promoted = _maybe_promote_model(result)
-        message = (
-            f"New model promoted as serving model (trained on {len(training_df)} rows: {fraud_count} fraud, {non_fraud_count} non-fraud)"
-            if promoted
-            else f"Model logged to MLflow but not promoted (metric not improved). Trained on {len(training_df)} rows."
-        )
+        # Compare new model vs current model on the same training data
+        promotion_result = _maybe_promote_model(result, training_df=training_df)
+        promoted = promotion_result["promoted"]
+        message = promotion_result["message"]
+        
+        # Add training data info to message
+        message += f" Trained on {len(training_df)} rows ({fraud_count} fraud, {non_fraud_count} non-fraud)."
 
         return TrainResponse(
             run_id=result.run_id,
@@ -232,19 +233,70 @@ def _payload_to_dataframe(records: List[MasterTransaction]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _maybe_promote_model(result: training.TrainingResult) -> bool:
+def _maybe_promote_model(
+    result: training.TrainingResult,
+    training_df: pd.DataFrame = None,
+) -> Dict[str, Any]:
+    """
+    Compare new model against current model on the SAME training data.
+    Always logs to MLflow. Only promotes if new model is better.
+    
+    Returns dict with:
+        - promoted: bool
+        - new_auc: float
+        - current_auc: float (or None if no current model)
+        - message: str
+    """
     candidate_metric = result.metrics.get("val_auc")
-    current_best = getattr(app.state, "best_metric", None)
-    improved = current_best is None or (candidate_metric > current_best + MODEL_IMPROVEMENT_DELTA)
+    current_model: FraudDetectionModel = getattr(app.state, "model", None)
+    current_artifacts = getattr(app.state, "artifacts", None)
+    
+    # Evaluate current model on the same training data for fair comparison
+    current_auc = None
+    if current_model is not None and current_model.model is not None and current_artifacts and training_df is not None:
+        try:
+            labelled_df = training_df.dropna(subset=["isFraud"]).copy()
+            if not labelled_df.empty:
+                labelled_df["isFraud"] = labelled_df["isFraud"].astype(int)
+                feature_source = preprocessing.build_feature_source_from_master(labelled_df)
+                features, _ = preprocessing.prepare_feature_frame(
+                    feature_source, artifacts=current_artifacts, fit=False
+                )
+                probs = current_model.predict_probabilities(features)
+                labels = labelled_df["isFraud"].values
+                if np.unique(labels).shape[0] >= 2:
+                    current_auc = roc_auc_score(labels, probs)
+                    logger.info("Current model AUC on training data: %.4f", current_auc)
+        except Exception as e:
+            logger.warning("Failed to evaluate current model on training data: %s", e)
+            current_auc = None
+    
+    # Determine if improvement occurred
+    if current_auc is None:
+        # No current model or evaluation failed - new model wins
+        improved = True
+        logger.info("No valid current model evaluation, promoting new model (AUC=%.4f)", candidate_metric)
+    else:
+        improved = candidate_metric > current_auc + MODEL_IMPROVEMENT_DELTA
+        logger.info(
+            "Comparison: New model AUC=%.4f vs Current model AUC=%.4f (delta=%.4f)",
+            candidate_metric, current_auc, MODEL_IMPROVEMENT_DELTA
+        )
 
     if not improved:
         logger.info(
-            "New model (AUC=%.4f) did not beat best metric %.4f",
+            "New model (AUC=%.4f) did not beat current model (AUC=%.4f)",
             candidate_metric,
-            current_best,
+            current_auc,
         )
-        return False
+        return {
+            "promoted": False,
+            "new_auc": candidate_metric,
+            "current_auc": current_auc,
+            "message": f"New model AUC ({candidate_metric:.4f}) did not beat current model AUC ({current_auc:.4f}). Model saved to MLflow (run_id: {result.run_id}) but not promoted.",
+        }
 
+    # Promote the new model
     joblib.dump(result.model, CANONICAL_MODEL_PATH)
     joblib.dump(result.artifacts, ARTIFACTS_PATH)
     if result.artifacts.get("train_cols"):
@@ -262,7 +314,13 @@ def _maybe_promote_model(result: training.TrainingResult) -> bool:
     app.state.artifacts = result.artifacts
     app.state.model.load(CANONICAL_MODEL_PATH.as_posix())
     logger.info("Promoted new model (AUC=%.4f) from run %s", candidate_metric, result.run_id)
-    return True
+    
+    return {
+        "promoted": True,
+        "new_auc": candidate_metric,
+        "current_auc": current_auc,
+        "message": f"New model promoted (AUC: {candidate_metric:.4f} vs previous: {current_auc if current_auc else 'N/A'}). Run ID: {result.run_id}",
+    }
 
 
 def _load_model_meta() -> Optional[Dict[str, Any]]:

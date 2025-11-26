@@ -18,8 +18,8 @@ imbalanced-learn
 # Model serialization
 joblib
 
-# Experiment tracking
-mlflow
+# Experiment tracking (pinned to match MLflow server version)
+mlflow==2.15.0
 
 # Testing
 locust

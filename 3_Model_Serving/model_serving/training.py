@@ -100,13 +100,49 @@ def _log_to_mlflow(
                 with open(tmp_cols_path, "w") as f:
                     json.dump(artifacts["train_cols"], f)
                 mlflow.log_artifact(tmp_cols_path, artifact_path="preprocessing")
+            
+            # Save model in sklearn format for model registry
+            sklearn_model_path = os.path.join(tmp_dir, "sklearn_model")
+            os.makedirs(sklearn_model_path, exist_ok=True)
+            model_file = os.path.join(sklearn_model_path, "model.joblib")
+            joblib.dump(model, model_file)
+            mlflow.log_artifact(sklearn_model_path, artifact_path="sklearn-model")
         
-        # Log sklearn model for easy loading
-        mlflow.sklearn.log_model(
-            model, 
-            artifact_path="sklearn-model",
-            registered_model_name="fraud-detection-xgboost"
-        )
+        # Register the model using MlflowClient directly (avoiding log_model API issues)
+        try:
+            from mlflow.tracking import MlflowClient
+            client = MlflowClient()
+            model_uri = f"runs:/{run.info.run_id}/model_artifacts"
+            
+            # Try to create registered model if it doesn't exist
+            try:
+                client.create_registered_model(
+                    "fraud-detection-xgboost",
+                    description="XGBoost fraud detection model trained with SMOTE"
+                )
+                logger.info("Created new registered model: fraud-detection-xgboost")
+            except Exception:
+                # Model already exists, which is fine
+                pass
+            
+            # Create a new version of the model
+            model_version = client.create_model_version(
+                name="fraud-detection-xgboost",
+                source=model_uri,
+                run_id=run.info.run_id,
+                description=f"AUC: {metrics.get('val_auc', 0):.4f}, Accuracy: {metrics.get('val_accuracy', 0):.4f}"
+            )
+            logger.info(f"Registered model version {model_version.version} for fraud-detection-xgboost")
+            
+            # Add tags to the model version
+            client.set_model_version_tag(
+                name="fraud-detection-xgboost",
+                version=model_version.version,
+                key="val_auc",
+                value=str(metrics.get('val_auc', 0))
+            )
+        except Exception as reg_error:
+            logger.warning(f"Model logged but registration failed: {reg_error}")
         
         logger.info(f"Logged run {run.info.run_id} to MLflow")
         return run.info.run_id
