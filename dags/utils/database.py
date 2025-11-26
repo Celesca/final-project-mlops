@@ -135,12 +135,15 @@ def save_prediction(
     prediction_time: Optional[str] = None,
 ) -> None:
     """
-    Save a prediction result to the appropriate table based on correctness.
+    Save a prediction result to the predictions table.
+    
+    The actual_label is initially stored as False (masked/unknown) and can be
+    updated later via the /PUT endpoint when the true label is confirmed.
     
     Args:
         transaction_id: Foreign key to the stored transaction
         prediction: Model prediction (True/False for is_fraud)
-        actual_label: Actual label (True/False for is_fraud)
+        actual_label: Ignored - always stored as False initially
         predict_proba: Probability score from model
         prediction_time: ISO timestamp (defaults to current time)
     """
@@ -151,28 +154,20 @@ def save_prediction(
         prediction_time = datetime.utcnow().isoformat()
     
     pred_int = 1 if prediction else 0
-    actual_int = 1 if actual_label else 0
-    is_correct = (prediction == actual_label)
+    # actual_label is always 0 (False/unknown) initially - will be updated manually later
+    actual_int = 0
     
     with get_cursor(commit=True) as cursor:
-        if is_correct:
-            cursor.execute(
-                """
-                INSERT INTO correct_predictions 
-                (transaction_id, prediction, actual_label, prediction_time)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (transaction_id, pred_int, actual_int, prediction_time),
-            )
-        else:
-            cursor.execute(
-                """
-                INSERT INTO incorrect_predictions 
-                (transaction_id, prediction, actual_label, predict_proba, prediction_time)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (transaction_id, pred_int, actual_int, float(predict_proba), prediction_time),
-            )
+        # Store in incorrect_predictions table (which has predict_proba column)
+        # This table now serves as the main predictions table
+        cursor.execute(
+            """
+            INSERT INTO incorrect_predictions 
+            (transaction_id, prediction, actual_label, predict_proba, prediction_time)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (transaction_id, pred_int, actual_int, float(predict_proba), prediction_time),
+        )
 
 
 MASTER_TX_COLUMNS = [
@@ -343,7 +338,7 @@ def get_correct_predictions(
     limit: Optional[int] = None,
 ) -> List[Dict]:
     """
-    Retrieve correct predictions from the database.
+    Retrieve predictions where prediction = 0 (non-fraud predictions).
     
     Args:
         limit: Optional limit on number of records
@@ -353,16 +348,18 @@ def get_correct_predictions(
     """
     query = f"""
         SELECT 
-            cp.id,
-            cp.transaction_id,
-            cp.prediction,
-            cp.actual_label,
-            cp.prediction_time,
-            cp.created_at,
+            ip.id,
+            ip.transaction_id,
+            ip.prediction,
+            ip.actual_label,
+            ip.predict_proba,
+            ip.prediction_time,
+            ip.created_at,
             {TRANSACTION_RESULT_SELECT}
-        FROM correct_predictions cp
-        JOIN all_transactions at ON at.id = cp.transaction_id
-        ORDER BY cp.prediction_time DESC
+        FROM incorrect_predictions ip
+        JOIN all_transactions at ON at.id = ip.transaction_id
+        WHERE ip.prediction = 0
+        ORDER BY ip.prediction_time DESC
     """
     params: List[Any] = []
     if limit:
@@ -381,6 +378,7 @@ def get_correct_predictions(
             "transaction_data": {col: row.get(col) for col in TRANSACTION_RESULT_COLUMNS},
             "prediction": bool(row["prediction"]),
             "actual_label": bool(row["actual_label"]),
+            "predict_proba": row["predict_proba"],
             "prediction_time": row["prediction_time"],
             "created_at": row["created_at"],
         })
@@ -455,7 +453,7 @@ def get_incorrect_predictions(
     limit: Optional[int] = None,
 ) -> List[Dict]:
     """
-    Retrieve incorrect predictions (FP and FN) from the database.
+    Retrieve predictions where prediction = 1 (fraud predictions).
     
     Args:
         limit: Optional limit on number of records
@@ -475,6 +473,7 @@ def get_incorrect_predictions(
             {TRANSACTION_RESULT_SELECT}
         FROM incorrect_predictions ip
         JOIN all_transactions at ON at.id = ip.transaction_id
+        WHERE ip.prediction = 1
         ORDER BY ip.prediction_time DESC
     """
     params: List[Any] = []
@@ -507,58 +506,35 @@ def get_prediction_stats() -> Dict:
     Get statistics about predictions stored in the database.
     
     Returns:
-        Dictionary with counts of TP, TN, FP, FN, and totals
+        Dictionary with counts of fraud predictions, non-fraud predictions, 
+        and confirmed labels
     """
     with get_cursor() as cursor:
-        cursor.execute("SELECT COUNT(*) FROM correct_predictions")
-        correct_count = cursor.fetchone()[0]
-        
+        # Total predictions
         cursor.execute("SELECT COUNT(*) FROM incorrect_predictions")
-        incorrect_count = cursor.fetchone()[0]
+        total_count = cursor.fetchone()[0]
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM incorrect_predictions 
-            WHERE prediction = 1 AND actual_label = 0
-            """
-        )
-        fp_count = cursor.fetchone()[0]
+        # Fraud predictions (prediction = 1)
+        cursor.execute("SELECT COUNT(*) FROM incorrect_predictions WHERE prediction = 1")
+        fraud_predictions = cursor.fetchone()[0]
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM incorrect_predictions 
-            WHERE prediction = 0 AND actual_label = 1
-            """
-        )
-        fn_count = cursor.fetchone()[0]
+        # Non-fraud predictions (prediction = 0)
+        cursor.execute("SELECT COUNT(*) FROM incorrect_predictions WHERE prediction = 0")
+        non_fraud_predictions = cursor.fetchone()[0]
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM correct_predictions 
-            WHERE prediction = 1 AND actual_label = 1
-            """
-        )
-        tp_count = cursor.fetchone()[0]
+        # Confirmed fraud (actual_label = 1)
+        cursor.execute("SELECT COUNT(*) FROM incorrect_predictions WHERE actual_label = 1")
+        confirmed_fraud = cursor.fetchone()[0]
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM correct_predictions 
-            WHERE prediction = 0 AND actual_label = 0
-            """
-        )
-        tn_count = cursor.fetchone()[0]
-    
-    total = correct_count + incorrect_count
-    accuracy = (correct_count / total * 100) if total > 0 else 0.0
+        # Unconfirmed (actual_label = 0, which is the initial masked state)
+        cursor.execute("SELECT COUNT(*) FROM incorrect_predictions WHERE actual_label = 0")
+        unconfirmed = cursor.fetchone()[0]
     
     return {
-        "total_predictions": total,
-        "correct_predictions": correct_count,
-        "incorrect_predictions": incorrect_count,
-        "true_positives": tp_count,
-        "true_negatives": tn_count,
-        "false_positives": fp_count,
-        "false_negatives": fn_count,
-        "accuracy": round(accuracy, 2)
+        "total_predictions": total_count,
+        "fraud_predictions": fraud_predictions,
+        "non_fraud_predictions": non_fraud_predictions,
+        "confirmed_fraud": confirmed_fraud,
+        "unconfirmed": unconfirmed,
     }
 
