@@ -6,20 +6,22 @@ import pandas as pd
 import joblib
 from sklearn.preprocessing import StandardScaler
 from enum import Enum as _Enum
+import logging
 
 from .schemas import TRANSAC_TYPE, ALLOWED_TRANSAC_TYPES
 
 FEATURE_COLUMNS = [
-    "transac_type",
+    "type",
     "amount",
-    "src_bal",
-    "src_new_bal",
-    "dst_bal",
-    "dst_new_bal",
+    'oldbalanceOrg', 
+    'newbalanceOrig', 
+    'oldbalanceDest', 
+    'newbalanceDest'
 ]
 
-NUMERIC_FEATURES = ["amount", "src_bal", "src_new_bal", "dst_bal", "dst_new_bal"]
+NUMERIC_FEATURES = ["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]
 
+logger = logging.getLogger(__name__)
 
 def parse_time_features(time_ind: str) -> Dict[str, Any]:
     try:
@@ -59,7 +61,7 @@ def transaction_to_features(transaction: Dict[str, Any]) -> Dict[str, Any]:
     features: Dict[str, Any] = {}
     features["amount"] = transaction.get("amount")
 
-    time_ind = transaction.get("time_ind")
+    time_ind = transaction.get("step")
     if time_ind is not None:
         time_feats = parse_time_features(str(time_ind))
         features.update(time_feats)
@@ -87,13 +89,15 @@ def build_feature_source_from_master(df: pd.DataFrame) -> pd.DataFrame:
         return pd.Series([None] * len(work))
 
     feature_df = pd.DataFrame()
-    feature_df["transac_type"] = _coalesce("transac_type", "type")
+    # Align output columns exactly with FEATURE_COLUMNS expected by the model
+    feature_df["type"] = _coalesce("type", "transac_type")
     feature_df["amount"] = _coalesce("amount")
-    feature_df["src_bal"] = _coalesce("src_bal", "oldbalanceOrg")
-    feature_df["src_new_bal"] = _coalesce("src_new_bal", "newbalanceOrig")
-    feature_df["dst_bal"] = _coalesce("dst_bal", "oldbalanceDest")
-    feature_df["dst_new_bal"] = _coalesce("dst_new_bal", "newbalanceDest")
+    feature_df["oldbalanceOrg"] = _coalesce("oldbalanceOrg", "src_bal")
+    feature_df["newbalanceOrig"] = _coalesce("newbalanceOrig", "src_new_bal")
+    feature_df["oldbalanceDest"] = _coalesce("oldbalanceDest", "dst_bal")
+    feature_df["newbalanceDest"] = _coalesce("newbalanceDest", "dst_new_bal")
 
+    # Return columns in the exact order/name expected downstream
     return feature_df[FEATURE_COLUMNS]
 
 
@@ -113,14 +117,15 @@ def prepare_feature_frame(
     if working.empty:
         return working, artifacts
 
-    if "transac_type" not in working.columns:
-        raise ValueError("Expected 'transac_type' column in feature dataframe")
+    # Expect the column named 'type' (matches FEATURE_COLUMNS)
+    if "type" not in working.columns:
+        raise ValueError("Expected 'type' column in feature dataframe")
 
-    working["transac_type"] = working["transac_type"].apply(_normalize_transac_type)
-    working["transac_type"] = pd.Categorical(
-        working["transac_type"], categories=ALLOWED_TRANSAC_TYPES
+    working["type"] = working["type"].apply(_normalize_transac_type)
+    working["type"] = pd.Categorical(
+        working["type"], categories=ALLOWED_TRANSAC_TYPES
     )
-    working = pd.get_dummies(working, columns=["transac_type"], drop_first=True)
+    working = pd.get_dummies(working, columns=["type"], drop_first=True)
 
     if fit:
         train_cols = list(working.columns)
@@ -150,10 +155,54 @@ def prepare_feature_frame(
 
     scaler = artifacts.get("scaler")
     if scaler is not None:
-        num_cols = artifacts.get("numerical_cols", [])
-        num_cols = [c for c in num_cols if c in working.columns]
-        if num_cols:
-            working[num_cols] = scaler.transform(working[num_cols].astype(float))
+        # Use scaler's own feature names if available (most reliable)
+        if hasattr(scaler, "feature_names_in_"):
+            scaler_cols = list(scaler.feature_names_in_)
+        else:
+            # Fallback to numerical_cols from artifacts
+            scaler_cols = list(artifacts.get("numerical_cols", []))
+
+        if not scaler_cols:
+            logger.warning("No scaler feature columns found; skipping scaler transform")
+        else:
+            # Mapping between canonical names (in current data) and legacy names
+            canonical_to_legacy = {
+                "oldbalanceOrg": "src_bal",
+                "newbalanceOrig": "src_new_bal",
+                "oldbalanceDest": "dst_bal",
+                "newbalanceDest": "dst_new_bal",
+            }
+            legacy_to_canonical = {v: k for k, v in canonical_to_legacy.items()}
+
+            # For each column the scaler needs, ensure it's present in working
+            for expected in scaler_cols:
+                if expected in working.columns:
+                    continue
+                # If expected is a legacy name (e.g. src_bal), try to get from canonical name
+                if expected in legacy_to_canonical:
+                    canonical_name = legacy_to_canonical[expected]
+                    if canonical_name in working.columns:
+                        working[expected] = working[canonical_name]
+                        logger.debug("Mapped %s -> %s for scaler", canonical_name, expected)
+                        continue
+                # If expected is a canonical name, try to get from legacy name
+                if expected in canonical_to_legacy:
+                    legacy_name = canonical_to_legacy[expected]
+                    if legacy_name in working.columns:
+                        working[expected] = working[legacy_name]
+                        logger.debug("Mapped %s -> %s for scaler", legacy_name, expected)
+                        continue
+
+            all_present = all(c in working.columns for c in scaler_cols)
+
+            if all_present:
+                # Transform using the scaler's expected column order
+                working[scaler_cols] = scaler.transform(working[scaler_cols].astype(float))
+            else:
+                logger.warning(
+                    "Scaler transform skipped because not all expected numeric columns are present: %s",
+                    scaler_cols,
+                )
     else:
         for col in working.columns:
             working[col] = pd.to_numeric(working[col], errors="coerce")
@@ -164,15 +213,15 @@ def prepare_feature_frame(
 def _transaction_to_feature_row(transaction: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize a transaction dict into the expected feature row schema."""
     row: Dict[str, Any] = {}
-    t_type = transaction.get("transac_type") or transaction.get("type")
+    t_type = transaction.get("type") or transaction.get("transac_type")
     if isinstance(t_type, _Enum):
         t_type = t_type.value
-    row["transac_type"] = _normalize_transac_type(t_type)
+    row["type"] = _normalize_transac_type(t_type)
     row["amount"] = transaction.get("amount")
-    row["src_bal"] = transaction.get("src_bal", transaction.get("oldbalanceOrg"))
-    row["src_new_bal"] = transaction.get("src_new_bal", transaction.get("newbalanceOrig"))
-    row["dst_bal"] = transaction.get("dst_bal", transaction.get("oldbalanceDest"))
-    row["dst_new_bal"] = transaction.get("dst_new_bal", transaction.get("newbalanceDest"))
+    row["oldbalanceOrg"] = transaction.get("oldbalanceOrg", transaction.get("src_bal"))
+    row["newbalanceOrig"] = transaction.get("newbalanceOrig", transaction.get("src_new_bal"))
+    row["oldbalanceDest"] = transaction.get("oldbalanceDest", transaction.get("dst_bal"))
+    row["newbalanceDest"] = transaction.get("newbalanceDest", transaction.get("dst_new_bal"))
     return row
 
 

@@ -2,7 +2,8 @@
 Helper functions for storing model predictions in the database.
 
 This module provides a convenient interface for saving predictions
-after model inference, automatically routing to the correct table.
+after model inference. In real-world scenarios, actual_label is unknown
+at prediction time and will be NULL initially.
 """
 from typing import Dict, Optional
 from datetime import datetime
@@ -12,29 +13,28 @@ from dags.utils.database import save_prediction, init_prediction_db, get_predict
 def store_prediction_result(
     transaction_id: int,
     prediction: bool,
-    actual_label: bool,
     predict_proba: float,
-    prediction_time: Optional[str] = None
-) -> None:
+    prediction_time: Optional[datetime] = None
+) -> int:
     """
-    Store a prediction result in the appropriate database table.
+    Store a prediction result in the predictions table.
     
-    This function automatically:
-    - Routes correct predictions (TP, TN) to correct_predictions table
-    - Routes incorrect predictions (FP, FN) to incorrect_predictions table with predict_proba
+    In real-world ML workflows, the actual_label is unknown at prediction time.
+    It will be set to NULL initially and updated later via human review.
     
     Args:
         transaction_id: ID of the transaction stored in all_transactions
         prediction: Model prediction (True/False for is_fraud)
-        actual_label: Actual label from ground truth (True/False for is_fraud)
         predict_proba: Probability score from model (0.0 to 1.0)
-        prediction_time: Optional ISO timestamp (defaults to current UTC time)
+        prediction_time: Optional timestamp (defaults to current UTC time)
+    
+    Returns:
+        ID of the saved prediction record
     
     Example:
-        >>> store_prediction_result(
+        >>> prediction_id = store_prediction_result(
         ...     transaction_id=123,
         ...     prediction=True,
-        ...     actual_label=True,  # TP case
         ...     predict_proba=0.85
         ... )
     """
@@ -44,10 +44,12 @@ def store_prediction_result(
     except Exception:
         pass  # Database might already exist
     
-    save_prediction(
+    if prediction_time is None:
+        prediction_time = datetime.utcnow()
+    
+    return save_prediction(
         transaction_id=transaction_id,
         prediction=prediction,
-        actual_label=actual_label,
         predict_proba=predict_proba,
         prediction_time=prediction_time
     )
@@ -60,13 +62,11 @@ def get_model_performance_stats() -> Dict:
     Returns:
         Dictionary with:
         - total_predictions: Total number of predictions
-        - correct_predictions: Number of correct predictions
-        - incorrect_predictions: Number of incorrect predictions
-        - true_positives: TP count
-        - true_negatives: TN count
-        - false_positives: FP count
-        - false_negatives: FN count
-        - accuracy: Accuracy percentage
+        - predicted_frauds: Number predicted as fraud
+        - predicted_non_frauds: Number predicted as non-fraud
+        - labeled_predictions: Predictions with actual_label set
+        - unlabeled_predictions: Predictions awaiting human review
+        - accuracy: Accuracy for labeled predictions (or None)
+        - total_transactions: Total transactions in database
     """
     return get_prediction_stats()
-

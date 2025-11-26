@@ -1,564 +1,774 @@
 """
-Database utilities for storing fraud detection prediction results.
-
-This module handles:
-1. Master transaction table (all ingested transactions)
-2. Correct predictions table (TP and TN cases)
-3. Incorrect predictions table (FP and FN cases with predict_proba)
+Database utilities for Fraud Detection MLOps Pipeline.
+Handles PostgreSQL operations for storing transactions and predictions.
+Uses a single 'predictions' table where actual_label is NULL initially.
 """
-from decimal import Decimal
-from typing import Dict, Optional, List, Any, Tuple
-from datetime import datetime, date
-from contextlib import contextmanager
 
+import os
+import logging
+from datetime import datetime
+from typing import Optional, List, Dict, Any, Tuple
 import psycopg2
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import execute_values, RealDictCursor
 
-from dags.config import FRAUD_DB_CONFIG
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Database configuration
+DB_CONFIG = {
+    'host': os.getenv('FRAUD_DB_HOST', 'fraud-db'),
+    'port': os.getenv('FRAUD_DB_PORT', '5432'),
+    'database': os.getenv('FRAUD_DB_NAME', 'fraud_detection'),
+    'user': os.getenv('FRAUD_DB_USER', 'fraud_user'),
+    'password': os.getenv('FRAUD_DB_PASSWORD', 'fraud_password')
+}
+
+# Transaction columns as they appear in the database (with quotes for mixed case)
+TRANSACTION_COLUMNS = [
+    'step', 'type', 'amount', 'nameOrig', 'oldbalanceOrg', 'newbalanceOrig',
+    'nameDest', 'oldbalanceDest', 'newbalanceDest', 'isFraud', 'isFlaggedFraud'
+]
 
 
-def _get_connection():
-    """Create a new psycopg2 connection using config/env variables."""
-    return psycopg2.connect(
-        host=FRAUD_DB_CONFIG["host"],
-        port=FRAUD_DB_CONFIG["port"],
-        dbname=FRAUD_DB_CONFIG["dbname"],
-        user=FRAUD_DB_CONFIG["user"],
-        password=FRAUD_DB_CONFIG["password"],
-    )
+def get_connection():
+    """Create and return a database connection."""
+    return psycopg2.connect(**DB_CONFIG)
 
 
-@contextmanager
-def get_cursor(commit: bool = False, dict_cursor: bool = False):
-    conn = _get_connection()
-    cursor_factory = RealDictCursor if dict_cursor else None
-    cur = conn.cursor(cursor_factory=cursor_factory)
+def init_prediction_db():
+    """
+    Initialize the prediction database with required tables.
+    Creates:
+    - all_transactions: stores transaction records
+    - predictions: stores predictions with actual_label initially NULL
+    """
+    conn = None
     try:
-        yield cur
-        if commit:
-            conn.commit()
-    finally:
-        cur.close()
-        conn.close()
-
-
-def init_prediction_db(_: Optional[Any] = None) -> None:
-    """
-    Initialize the prediction database with two tables:
-    1. correct_predictions - for TP and TN cases
-    2. incorrect_predictions - for FP and FN cases (includes predict_proba)
-    """
-    with get_cursor(commit=True) as cursor:
-        # Table 1: All transactions (raw ingestion storage with explicit columns)
-        cursor.execute("""
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Create all_transactions table
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS all_transactions (
                 id SERIAL PRIMARY KEY,
-                step INTEGER,
-                type TEXT,
-                amount DOUBLE PRECISION,
-                nameOrig TEXT,
-                oldbalanceOrg DOUBLE PRECISION,
-                newbalanceOrig DOUBLE PRECISION,
-                nameDest TEXT,
-                oldbalanceDest DOUBLE PRECISION,
-                newbalanceDest DOUBLE PRECISION,
-                isFraud INTEGER,
-                isFlaggedFraud INTEGER,
-                ingest_date DATE NOT NULL,
-                source_file TEXT,
+                step INTEGER NOT NULL,
+                type VARCHAR(50) NOT NULL,
+                amount DOUBLE PRECISION NOT NULL,
+                "nameOrig" VARCHAR(100) NOT NULL,
+                "oldbalanceOrg" DOUBLE PRECISION NOT NULL,
+                "newbalanceOrig" DOUBLE PRECISION NOT NULL,
+                "nameDest" VARCHAR(100) NOT NULL,
+                "oldbalanceDest" DOUBLE PRECISION NOT NULL,
+                "newbalanceDest" DOUBLE PRECISION NOT NULL,
+                "isFraud" BOOLEAN NOT NULL,
+                "isFlaggedFraud" BOOLEAN NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
-        """)
-
-        # Table 2: Correct predictions (TP and TN)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS correct_predictions (
-                id SERIAL PRIMARY KEY,
-                transaction_id INTEGER NOT NULL REFERENCES all_transactions(id) ON DELETE CASCADE,
-                prediction INTEGER NOT NULL,
-                actual_label INTEGER NOT NULL,
-                prediction_time TIMESTAMPTZ NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        ''')
         
-        # Table 3: Incorrect predictions (FP and FN) with predict_proba
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS incorrect_predictions (
+        # Create single predictions table with actual_label as nullable
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS predictions (
                 id SERIAL PRIMARY KEY,
                 transaction_id INTEGER NOT NULL REFERENCES all_transactions(id) ON DELETE CASCADE,
-                prediction INTEGER NOT NULL,
-                actual_label INTEGER NOT NULL,
+                prediction BOOLEAN NOT NULL,
+                actual_label BOOLEAN,
                 predict_proba DOUBLE PRECISION NOT NULL,
                 prediction_time TIMESTAMPTZ NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
-        """)
+        ''')
         
-        # Indexes
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_all_transactions_ingest 
-            ON all_transactions(ingest_date)
-        """)
-
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_correct_predictions_time 
-            ON correct_predictions(prediction_time)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_correct_predictions_transaction 
-            ON correct_predictions(transaction_id)
-        """)
+        # Create indexes for better query performance
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_predictions_transaction_id 
+            ON predictions(transaction_id)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_predictions_prediction 
+            ON predictions(prediction)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_predictions_actual_label 
+            ON predictions(actual_label)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_predictions_prediction_time 
+            ON predictions(prediction_time)
+        ''')
         
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_incorrect_predictions_time 
-            ON incorrect_predictions(prediction_time)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_incorrect_predictions_transaction 
-            ON incorrect_predictions(transaction_id)
-        """)
+        conn.commit()
+        logger.info("Prediction database initialized successfully")
+        return True
         
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_incorrect_predictions_type 
-            ON incorrect_predictions(prediction, actual_label)
-        """)
-
-    print("✅ Fraud prediction tables ensured in Postgres")
+    except Exception as e:
+        logger.error(f"Error initializing prediction database: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 
 def save_prediction(
     transaction_id: int,
     prediction: bool,
-    actual_label: bool,
     predict_proba: float,
-    prediction_time: Optional[str] = None,
-) -> None:
-    """
-    Save a prediction result to the appropriate table based on correctness.
-    
-    Args:
-        transaction_id: Foreign key to the stored transaction
-        prediction: Model prediction (True/False for is_fraud)
-        actual_label: Actual label (True/False for is_fraud)
-        predict_proba: Probability score from model
-        prediction_time: ISO timestamp (defaults to current time)
-    """
-    if transaction_id is None:
-        raise ValueError("transaction_id is required to save a prediction record.")
-
-    if prediction_time is None:
-        prediction_time = datetime.utcnow().isoformat()
-    
-    pred_int = 1 if prediction else 0
-    actual_int = 1 if actual_label else 0
-    is_correct = (prediction == actual_label)
-    
-    with get_cursor(commit=True) as cursor:
-        if is_correct:
-            cursor.execute(
-                """
-                INSERT INTO correct_predictions 
-                (transaction_id, prediction, actual_label, prediction_time)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (transaction_id, pred_int, actual_int, prediction_time),
-            )
-        else:
-            cursor.execute(
-                """
-                INSERT INTO incorrect_predictions 
-                (transaction_id, prediction, actual_label, predict_proba, prediction_time)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (transaction_id, pred_int, actual_int, float(predict_proba), prediction_time),
-            )
-
-
-MASTER_TX_COLUMNS = [
-    "step",
-    "type",
-    "amount",
-    "nameOrig",
-    "oldbalanceOrg",
-    "newbalanceOrig",
-    "nameDest",
-    "oldbalanceDest",
-    "newbalanceDest",
-    "isFraud",
-    "isFlaggedFraud",
-]
-
-TRANSACTION_KEY_COLUMNS = [
-    "ingest_date",
-    "step",
-    "type",
-    "amount",
-    "nameOrig",
-    "nameDest",
-    "oldbalanceOrg",
-    "oldbalanceDest",
-    "newbalanceOrig",
-    "newbalanceDest",
-]
-
-TRANSACTION_RESULT_COLUMNS = MASTER_TX_COLUMNS + ["ingest_date", "source_file"]
-
-
-def _alias_column(column: str, table_alias: str = "at") -> str:
-    # If the logical column name contains uppercase letters we must quote
-    # the identifier in SQL so Postgres matches the exact mixed-case name
-    # (some deployments use quoted mixed-case column names). For plain
-    # lowercase names use the unquoted form.
-    if column.islower():
-        return f'{table_alias}.{column} AS "{column}"'
-    else:
-        return f'{table_alias}."{column}" AS "{column}"'
-
-
-TRANSACTION_RESULT_SELECT = ", ".join(_alias_column(col) for col in TRANSACTION_RESULT_COLUMNS)
-TRANSACTION_LOOKUP_SELECT = ", ".join(_alias_column(col) for col in TRANSACTION_KEY_COLUMNS)
-
-
-def _normalize_key_value(value: Any):
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if hasattr(value, "item"):
-        return _normalize_key_value(value.item())
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (int, float)):
-        return float(value)
-    return value
-
-
-def build_transaction_key(transaction: Dict[str, Any], ingest_date: Optional[str] = None) -> Tuple[Any, ...]:
-    """
-    Build a deterministic key for mapping transactions back to their DB row.
-    """
-    key_parts: List[Any] = []
-    for column in TRANSACTION_KEY_COLUMNS:
-        if column == "ingest_date":
-            key_parts.append(_normalize_key_value(transaction.get(column, ingest_date)))
-            continue
-        key_parts.append(_normalize_key_value(transaction.get(column)))
-    return tuple(key_parts)
-
-
-def get_transaction_lookup_for_ingest(ingest_date: str) -> Dict[Tuple[Any, ...], int]:
-    """
-    Build a lookup table of transaction keys -> database IDs for a given ingest date.
-    """
-    query = f"""
-        SELECT at.id, {TRANSACTION_LOOKUP_SELECT}
-        FROM all_transactions at
-        WHERE at.ingest_date = %s
-    """
-    with get_cursor(dict_cursor=True) as cursor:
-        cursor.execute(query, (ingest_date,))
-        rows = cursor.fetchall()
-
-    lookup: Dict[Tuple[Any, ...], int] = {}
-    for row in rows:
-        lookup[build_transaction_key(row)] = row["id"]
-    return lookup
-
-
-def _extract_master_row(transaction: Dict) -> List:
-    """Extract ordered column values for master table."""
-    row = []
-    for col in MASTER_TX_COLUMNS:
-        value = transaction.get(col)
-        if col in {"isFraud", "isFlaggedFraud"} and value is not None:
-            value = bool(value)
-        row.append(value)
-    return row
-
-
-def save_transaction_record(
-    transaction: Dict,
-    ingest_date: str,
-    source_file: Optional[str] = None,
+    prediction_time: datetime
 ) -> int:
     """
-    Persist a raw transaction into the all_transactions table and return its ID.
-    """
-    row = _extract_master_row(transaction)
-    row.extend([ingest_date, source_file])
-
-    with get_cursor(commit=True) as cursor:
-        cursor.execute(
-            """
-            INSERT INTO all_transactions (
-                step, type, amount, "nameOrig", "oldbalanceOrg", "newbalanceOrig",
-                "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud",
-                ingest_date, source_file
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            row,
-        )
-        new_id = cursor.fetchone()[0]
-    return new_id
-
-
-def save_transactions_bulk(
-    transactions: List[Dict],
-    ingest_date: str,
-    source_file: Optional[str] = None,
-) -> None:
-    """
-    Persist multiple transactions efficiently.
-    """
-    if not transactions:
-        return
-
-    payload = []
-    for txn in transactions:
-        row = _extract_master_row(txn)
-        row.extend([ingest_date, source_file])
-        payload.append(tuple(row))
-
-    with get_cursor(commit=True) as cursor:
-        execute_values(
-            cursor,
-            """
-            INSERT INTO all_transactions (
-                step, type, amount, "nameOrig", "oldbalanceOrg", "newbalanceOrig",
-                "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud",
-                ingest_date, source_file
-            )
-            VALUES %s
-            """,
-            payload,
-        )
-
-
-def get_correct_predictions(
-    limit: Optional[int] = None,
-) -> List[Dict]:
-    """
-    Retrieve correct predictions from the database.
+    Save a prediction to the predictions table.
+    actual_label is always NULL initially - it will be updated later via human review.
     
     Args:
-        limit: Optional limit on number of records
+        transaction_id: ID of the transaction
+        prediction: Model's prediction (True for fraud, False for non-fraud)
+        predict_proba: Probability score from model
+        prediction_time: When prediction was made
     
     Returns:
-        List of dictionaries with prediction records
+        ID of the saved prediction record
     """
-    query = f"""
-        SELECT 
-            cp.id,
-            cp.transaction_id,
-            cp.prediction,
-            cp.actual_label,
-            cp.prediction_time,
-            cp.created_at,
-            {TRANSACTION_RESULT_SELECT}
-        FROM correct_predictions cp
-        JOIN all_transactions at ON at.id = cp.transaction_id
-        ORDER BY cp.prediction_time DESC
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO predictions (
+                transaction_id, prediction, actual_label, predict_proba, prediction_time
+            )
+            VALUES (%s, %s, NULL, %s, %s)
+            RETURNING id
+        ''', (transaction_id, prediction, predict_proba, prediction_time))
+        
+        prediction_id = cursor.fetchone()[0]
+        conn.commit()
+        
+        logger.info(f"Saved prediction {prediction_id} for transaction {transaction_id}")
+        return prediction_id
+        
+    except Exception as e:
+        logger.error(f"Error saving prediction: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_transactions_bulk(transactions: List[Dict[str, Any]]) -> List[int]:
     """
-    params: List[Any] = []
-    if limit:
-        query += " LIMIT %s"
-        params.append(limit)
+    Save multiple transactions in bulk for better performance.
     
-    with get_cursor(dict_cursor=True) as cursor:
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
+    Args:
+        transactions: List of transaction dictionaries
+        
+    Returns:
+        List of saved transaction IDs
+    """
+    if not transactions:
+        return []
     
-    result = []
-    for row in rows:
-        result.append({
-            "id": row["id"],
-            "transaction_id": row["transaction_id"],
-            "transaction_data": {col: row.get(col) for col in TRANSACTION_RESULT_COLUMNS},
-            "prediction": bool(row["prediction"]),
-            "actual_label": bool(row["actual_label"]),
-            "prediction_time": row["prediction_time"],
-            "created_at": row["created_at"],
-        })
-    
-    return result
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        columns = ', '.join([f'"{col}"' if any(c.isupper() for c in col) else col 
+                            for col in TRANSACTION_COLUMNS])
+        
+        # Prepare values for bulk insert
+        values_list = []
+        for tx in transactions:
+            row = []
+            for col in TRANSACTION_COLUMNS:
+                val = tx.get(col)
+                if col in ('isFraud', 'isFlaggedFraud'):
+                    val = bool(val) if val is not None else False
+                row.append(val)
+            values_list.append(tuple(row))
+        
+        # Use execute_values for efficient bulk insert
+        query = f'''
+            INSERT INTO all_transactions ({columns})
+            VALUES %s
+            RETURNING id
+        '''
+        
+        cursor.execute(f'''
+            INSERT INTO all_transactions ({columns})
+            VALUES {','.join(['(' + ','.join(['%s'] * len(TRANSACTION_COLUMNS)) + ')'] * len(values_list))}
+            RETURNING id
+        ''', [val for row in values_list for val in row])
+        
+        ids = [row[0] for row in cursor.fetchall()]
+        conn.commit()
+        
+        logger.info(f"Saved {len(ids)} transactions in bulk")
+        return ids
+        
+    except Exception as e:
+        logger.error(f"Error saving transactions in bulk: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_transactions(
-    ingest_date: Optional[str] = None,
     limit: Optional[int] = None,
-) -> List[Dict]:
+    offset: int = 0,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None
+) -> List[Dict[str, Any]]:
     """
-    Retrieve transactions from the all_transactions table.
-
+    Retrieve transactions from the database.
+    
     Args:
-        ingest_date: Optional YYYY-MM-DD filter
-        limit: Optional limit on number of records
-
+        limit: Maximum number of records to return
+        offset: Number of records to skip
+        start_date: Filter by created_at >= start_date
+        end_date: Filter by created_at <= end_date
+        
     Returns:
         List of transaction dictionaries
     """
-    # Use quoted identifiers for mixed-case columns to match the DB init SQL
-    query = """
-        SELECT id, step, type, amount, "nameOrig", "oldbalanceOrg", "newbalanceOrig",
-               "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud",
-               ingest_date, source_file, created_at
-        FROM all_transactions
-    """
-    params: List[Any] = []
-    clauses = []
-
-    if ingest_date:
-        clauses.append("ingest_date = %s")
-        params.append(ingest_date)
-
-    if clauses:
-        query += " WHERE " + " AND ".join(clauses)
-
-    query += " ORDER BY created_at DESC"
-
-    if limit:
-        query += " LIMIT %s"
-        params.append(limit)
-
-    with get_cursor(dict_cursor=True) as cursor:
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = 'SELECT * FROM all_transactions WHERE 1=1'
+        params = []
+        
+        if start_date:
+            query += ' AND created_at >= %s'
+            params.append(start_date)
+        
+        if end_date:
+            query += ' AND created_at <= %s'
+            params.append(end_date)
+        
+        query += ' ORDER BY created_at DESC'
+        
+        if limit:
+            query += ' LIMIT %s'
+            params.append(limit)
+        
+        if offset:
+            query += ' OFFSET %s'
+            params.append(offset)
+        
         cursor.execute(query, params)
-        rows = cursor.fetchall()
-
-    return [
-        {
-            "id": row["id"],
-            "step": row["step"],
-            "type": row["type"],
-            "amount": row["amount"],
-            "nameOrig": row.get("nameOrig") if "nameOrig" in row else row.get("nameorig"),
-            "oldbalanceOrg": row.get("oldbalanceOrg") if "oldbalanceOrg" in row else row.get("oldbalanceorg"),
-            "newbalanceOrig": row.get("newbalanceOrig") if "newbalanceOrig" in row else row.get("newbalanceorig"),
-            "nameDest": row.get("nameDest") if "nameDest" in row else row.get("namedest"),
-            "oldbalanceDest": row.get("oldbalanceDest") if "oldbalanceDest" in row else row.get("oldbalancedest"),
-            "newbalanceDest": row.get("newbalanceDest") if "newbalanceDest" in row else row.get("newbalancedest"),
-            "isFraud": bool(row.get("isFraud") if "isFraud" in row else row.get("isfraud")),
-            "isFlaggedFraud": bool(row.get("isFlaggedFraud") if "isFlaggedFraud" in row else row.get("isflaggedfraud")),
-            "ingest_date": row["ingest_date"],
-            "source_file": row["source_file"],
-            "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
+        results = cursor.fetchall()
+        
+        return [dict(row) for row in results]
+        
+    except Exception as e:
+        logger.error(f"Error getting transactions: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 
-def get_incorrect_predictions(
+def get_all_predictions(
     limit: Optional[int] = None,
-) -> List[Dict]:
+    offset: int = 0,
+    only_unlabeled: bool = False
+) -> List[Dict[str, Any]]:
     """
-    Retrieve incorrect predictions (FP and FN) from the database.
+    Get all predictions with their associated transactions.
     
     Args:
-        limit: Optional limit on number of records
-    
+        limit: Maximum number of records to return
+        offset: Number of records to skip
+        only_unlabeled: If True, return only predictions where actual_label is NULL
+        
     Returns:
-        List of dictionaries with prediction records including predict_proba
+        List of prediction records with transaction data
     """
-    query = f"""
-        SELECT 
-            ip.id,
-            ip.transaction_id,
-            ip.prediction,
-            ip.actual_label,
-            ip.predict_proba,
-            ip.prediction_time,
-            ip.created_at,
-            {TRANSACTION_RESULT_SELECT}
-        FROM incorrect_predictions ip
-        JOIN all_transactions at ON at.id = ip.transaction_id
-        ORDER BY ip.prediction_time DESC
-    """
-    params: List[Any] = []
-    if limit:
-        query += " LIMIT %s"
-        params.append(limit)
-    
-    with get_cursor(dict_cursor=True) as cursor:
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = '''
+            SELECT 
+                p.id as prediction_id,
+                p.transaction_id,
+                p.prediction,
+                p.actual_label,
+                p.predict_proba,
+                p.prediction_time,
+                p.created_at as prediction_created_at,
+                t.*
+            FROM predictions p
+            JOIN all_transactions t ON p.transaction_id = t.id
+            WHERE 1=1
+        '''
+        params = []
+        
+        if only_unlabeled:
+            query += ' AND p.actual_label IS NULL'
+        
+        query += ' ORDER BY p.prediction_time DESC'
+        
+        if limit:
+            query += ' LIMIT %s'
+            params.append(limit)
+        
+        if offset:
+            query += ' OFFSET %s'
+            params.append(offset)
+        
         cursor.execute(query, params)
-        rows = cursor.fetchall()
-    
-    result = []
-    for row in rows:
-        result.append({
-            "id": row["id"],
-            "transaction_id": row["transaction_id"],
-            "transaction_data": {col: row.get(col) for col in TRANSACTION_RESULT_COLUMNS},
-            "prediction": bool(row["prediction"]),
-            "actual_label": bool(row["actual_label"]),
-            "predict_proba": row["predict_proba"],
-            "prediction_time": row["prediction_time"],
-            "created_at": row["created_at"],
-        })
-    
-    return result
+        results = cursor.fetchall()
+        
+        return [dict(row) for row in results]
+        
+    except Exception as e:
+        logger.error(f"Error getting predictions: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 
-def get_prediction_stats() -> Dict:
+def get_frauds(
+    limit: Optional[int] = None,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
     """
-    Get statistics about predictions stored in the database.
+    Get predictions where prediction = True (predicted as fraud).
+    
+    Args:
+        limit: Maximum number of records to return
+        offset: Number of records to skip
+        
+    Returns:
+        List of predictions predicted as fraud
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = '''
+            SELECT 
+                p.id as prediction_id,
+                p.transaction_id,
+                p.prediction,
+                p.actual_label,
+                p.predict_proba,
+                p.prediction_time,
+                p.created_at as prediction_created_at,
+                t.*
+            FROM predictions p
+            JOIN all_transactions t ON p.transaction_id = t.id
+            WHERE p.prediction = TRUE
+            ORDER BY p.prediction_time DESC
+        '''
+        params = []
+        
+        if limit:
+            query += ' LIMIT %s'
+            params.append(limit)
+        
+        if offset:
+            query += ' OFFSET %s'
+            params.append(offset)
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        
+        return [dict(row) for row in results]
+        
+    except Exception as e:
+        logger.error(f"Error getting frauds: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_non_frauds(
+    limit: Optional[int] = None,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """
+    Get predictions where prediction = False (predicted as non-fraud).
+    
+    Args:
+        limit: Maximum number of records to return
+        offset: Number of records to skip
+        
+    Returns:
+        List of predictions predicted as non-fraud
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = '''
+            SELECT 
+                p.id as prediction_id,
+                p.transaction_id,
+                p.prediction,
+                p.actual_label,
+                p.predict_proba,
+                p.prediction_time,
+                p.created_at as prediction_created_at,
+                t.*
+            FROM predictions p
+            JOIN all_transactions t ON p.transaction_id = t.id
+            WHERE p.prediction = FALSE
+            ORDER BY p.prediction_time DESC
+        '''
+        params = []
+        
+        if limit:
+            query += ' LIMIT %s'
+            params.append(limit)
+        
+        if offset:
+            query += ' OFFSET %s'
+            params.append(offset)
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        
+        return [dict(row) for row in results]
+        
+    except Exception as e:
+        logger.error(f"Error getting non-frauds: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def update_actual_label(prediction_id: int, actual_label: bool) -> bool:
+    """
+    Update the actual_label for a prediction after human review.
+    
+    Args:
+        prediction_id: ID of the prediction to update
+        actual_label: The actual label (True for fraud, False for non-fraud)
+        
+    Returns:
+        True if update was successful, False otherwise
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE predictions 
+            SET actual_label = %s
+            WHERE id = %s
+        ''', (actual_label, prediction_id))
+        
+        rows_affected = cursor.rowcount
+        conn.commit()
+        
+        if rows_affected > 0:
+            logger.info(f"Updated actual_label for prediction {prediction_id} to {actual_label}")
+            return True
+        else:
+            logger.warning(f"No prediction found with id {prediction_id}")
+            return False
+        
+    except Exception as e:
+        logger.error(f"Error updating actual_label: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_prediction_stats() -> Dict[str, Any]:
+    """
+    Get statistics about predictions.
     
     Returns:
-        Dictionary with counts of TP, TN, FP, FN, and totals
+        Dictionary containing prediction statistics
     """
-    with get_cursor() as cursor:
-        cursor.execute("SELECT COUNT(*) FROM correct_predictions")
-        correct_count = cursor.fetchone()[0]
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        cursor.execute("SELECT COUNT(*) FROM incorrect_predictions")
-        incorrect_count = cursor.fetchone()[0]
+        # Get total counts
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total_predictions,
+                COUNT(CASE WHEN prediction = TRUE THEN 1 END) as predicted_frauds,
+                COUNT(CASE WHEN prediction = FALSE THEN 1 END) as predicted_non_frauds,
+                COUNT(CASE WHEN actual_label IS NOT NULL THEN 1 END) as labeled_predictions,
+                COUNT(CASE WHEN actual_label IS NULL THEN 1 END) as unlabeled_predictions
+            FROM predictions
+        ''')
+        counts = dict(cursor.fetchone())
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM incorrect_predictions 
-            WHERE prediction = 1 AND actual_label = 0
-            """
-        )
-        fp_count = cursor.fetchone()[0]
+        # Get accuracy for labeled predictions
+        cursor.execute('''
+            SELECT 
+                COUNT(CASE WHEN prediction = actual_label THEN 1 END) as correct,
+                COUNT(*) as total
+            FROM predictions
+            WHERE actual_label IS NOT NULL
+        ''')
+        accuracy_data = cursor.fetchone()
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM incorrect_predictions 
-            WHERE prediction = 0 AND actual_label = 1
-            """
-        )
-        fn_count = cursor.fetchone()[0]
+        if accuracy_data['total'] > 0:
+            accuracy = accuracy_data['correct'] / accuracy_data['total']
+        else:
+            accuracy = None
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM correct_predictions 
-            WHERE prediction = 1 AND actual_label = 1
-            """
-        )
-        tp_count = cursor.fetchone()[0]
+        # Get transaction count
+        cursor.execute('SELECT COUNT(*) as total FROM all_transactions')
+        transaction_count = cursor.fetchone()['total']
         
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM correct_predictions 
-            WHERE prediction = 0 AND actual_label = 0
-            """
-        )
-        tn_count = cursor.fetchone()[0]
+        return {
+            **counts,
+            'accuracy': accuracy,
+            'total_transactions': transaction_count
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting prediction stats: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_labeled_predictions_for_training() -> List[Dict[str, Any]]:
+    """
+    Get all predictions that have been labeled (actual_label is not NULL).
+    These can be used for retraining the model.
     
-    total = correct_count + incorrect_count
-    accuracy = (correct_count / total * 100) if total > 0 else 0.0
+    Returns:
+        List of labeled predictions with transaction data
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute('''
+            SELECT 
+                p.id as prediction_id,
+                p.transaction_id,
+                p.prediction,
+                p.actual_label,
+                p.predict_proba,
+                p.prediction_time,
+                t.*
+            FROM predictions p
+            JOIN all_transactions t ON p.transaction_id = t.id
+            WHERE p.actual_label IS NOT NULL
+            ORDER BY p.prediction_time DESC
+        ''')
+        
+        results = cursor.fetchall()
+        return [dict(row) for row in results]
+        
+    except Exception as e:
+        logger.error(f"Error getting labeled predictions: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_misclassified_predictions() -> List[Dict[str, Any]]:
+    """
+    Get predictions where the model's prediction differs from the actual label.
     
-    return {
-        "total_predictions": total,
-        "correct_predictions": correct_count,
-        "incorrect_predictions": incorrect_count,
-        "true_positives": tp_count,
-        "true_negatives": tn_count,
-        "false_positives": fp_count,
-        "false_negatives": fn_count,
-        "accuracy": round(accuracy, 2)
-    }
+    Returns:
+        List of misclassified predictions
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute('''
+            SELECT 
+                p.id as prediction_id,
+                p.transaction_id,
+                p.prediction,
+                p.actual_label,
+                p.predict_proba,
+                p.prediction_time,
+                t.*
+            FROM predictions p
+            JOIN all_transactions t ON p.transaction_id = t.id
+            WHERE p.actual_label IS NOT NULL 
+              AND p.prediction != p.actual_label
+            ORDER BY p.prediction_time DESC
+        ''')
+        
+        results = cursor.fetchall()
+        return [dict(row) for row in results]
+        
+    except Exception as e:
+        logger.error(f"Error getting misclassified predictions: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def drop_all_tables():
+    """Drop all tables (for testing/reset purposes)."""
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('DROP TABLE IF EXISTS predictions CASCADE')
+        cursor.execute('DROP TABLE IF EXISTS all_transactions CASCADE')
+        
+        conn.commit()
+        logger.info("All tables dropped successfully")
+        
+    except Exception as e:
+        logger.error(f"Error dropping tables: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def build_transaction_key(transaction: Dict[str, Any], ingest_date: str = None) -> str:
+    """
+    Build a unique key for a transaction to use in lookups.
+    
+    Args:
+        transaction: Transaction dictionary
+        ingest_date: Optional ingest date to include in key
+        
+    Returns:
+        String key that uniquely identifies the transaction
+    """
+    step = transaction.get('step', '')
+    tx_type = transaction.get('type', '')
+    amount = transaction.get('amount', '')
+    name_orig = transaction.get('nameOrig', '')
+    name_dest = transaction.get('nameDest', '')
+    
+    key_parts = [str(step), tx_type, str(amount), name_orig, name_dest]
+    if ingest_date:
+        key_parts.append(ingest_date)
+    
+    return '|'.join(key_parts)
+
+
+def get_transaction_lookup_for_ingest(ingest_date: str) -> Dict[str, int]:
+    """
+    Get a lookup dictionary of transaction keys to IDs for a given ingest date.
+    
+    Args:
+        ingest_date: The date to filter transactions by (YYYY-MM-DD format)
+        
+    Returns:
+        Dictionary mapping transaction keys to their IDs
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute('''
+            SELECT id, step, type, amount, "nameOrig", "nameDest"
+            FROM all_transactions
+            WHERE DATE(created_at) = %s
+        ''', (ingest_date,))
+        
+        results = cursor.fetchall()
+        lookup = {}
+        
+        for row in results:
+            key = build_transaction_key(dict(row), ingest_date)
+            lookup[key] = row['id']
+        
+        return lookup
+        
+    except Exception as e:
+        logger.error(f"Error getting transaction lookup: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_transaction_record(
+    transaction: Dict[str, Any],
+    ingest_date: str = None,
+    source_file: str = None
+) -> int:
+    """
+    Save a single transaction record to the database.
+    
+    Args:
+        transaction: Dictionary containing transaction fields
+        ingest_date: Optional ingest date
+        source_file: Optional source file name
+        
+    Returns:
+        ID of the saved transaction
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        columns = ', '.join([f'"{col}"' if any(c.isupper() for c in col) else col 
+                            for col in TRANSACTION_COLUMNS])
+        placeholders = ', '.join(['%s'] * len(TRANSACTION_COLUMNS))
+        
+        values = []
+        for col in TRANSACTION_COLUMNS:
+            val = transaction.get(col)
+            # Convert boolean fields
+            if col in ('isFraud', 'isFlaggedFraud'):
+                val = bool(val) if val is not None else False
+            values.append(val)
+        
+        cursor.execute(f'''
+            INSERT INTO all_transactions ({columns})
+            VALUES ({placeholders})
+            RETURNING id
+        ''', values)
+        
+        transaction_id = cursor.fetchone()[0]
+        conn.commit()
+        
+        logger.info(f"Saved transaction {transaction_id}")
+        return transaction_id
+        
+    except Exception as e:
+        logger.error(f"Error saving transaction: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
 

@@ -277,133 +277,134 @@ def _evaluate_against_master(
 
 @app.get("/query/GET/predictions")
 def get_predictions(limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return joined predictions from correct and incorrect prediction tables.
+    """Return all predictions from the predictions table.
 
-    Each record includes prediction metadata and cleaned `transaction_data`.
+    Each record includes prediction metadata and transaction data.
+    actual_label may be NULL for unlabeled predictions.
     """
     from dags.utils import database as db
     
-    correct = db.get_correct_predictions(limit)
-    incorrect = db.get_incorrect_predictions(limit)
-
-    combined: List[Dict[str, Any]] = []
-
-    for r in correct:
-        tx = _clean_transaction_data(r.get("transaction_data") or {})
-        combined.append(
-            {
-                "id": r.get("id"),
-                "transaction_id": r.get("transaction_id"),
-                "prediction": r.get("prediction"),
-                "actual_label": r.get("actual_label"),
-                "prediction_time": r.get("prediction_time"),
-                "created_at": r.get("created_at"),
-                "transaction_data": tx,
-                "source": "correct",
-            }
-        )
-
-    for r in incorrect:
-        tx = _clean_transaction_data(r.get("transaction_data") or {})
-        combined.append(
-            {
-                "id": r.get("id"),
-                "transaction_id": r.get("transaction_id"),
-                "prediction": r.get("prediction"),
-                "actual_label": r.get("actual_label"),
-                "predict_proba": r.get("predict_proba"),
-                "prediction_time": r.get("prediction_time"),
-                "created_at": r.get("created_at"),
-                "transaction_data": tx,
-                "source": "incorrect",
-            }
-        )
-
-    # sort by prediction_time (descending) when available
-    combined.sort(key=lambda x: x.get("prediction_time") or "", reverse=True)
-    return combined
+    predictions = db.get_all_predictions(limit=limit)
+    
+    results: List[Dict[str, Any]] = []
+    for r in predictions:
+        results.append({
+            "id": r.get("prediction_id"),
+            "transaction_id": r.get("transaction_id"),
+            "prediction": r.get("prediction"),
+            "actual_label": r.get("actual_label"),
+            "predict_proba": r.get("predict_proba"),
+            "prediction_time": r.get("prediction_time"),
+            "created_at": r.get("prediction_created_at"),
+            "step": r.get("step"),
+            "type": r.get("type"),
+            "amount": r.get("amount"),
+            "nameOrig": r.get("nameOrig"),
+            "oldbalanceOrg": r.get("oldbalanceOrg"),
+            "newbalanceOrig": r.get("newbalanceOrig"),
+            "nameDest": r.get("nameDest"),
+            "oldbalanceDest": r.get("oldbalanceDest"),
+            "newbalanceDest": r.get("newbalanceDest"),
+            "isFraud": r.get("isFraud"),
+            "isFlaggedFraud": r.get("isFlaggedFraud"),
+        })
+    
+    return results
 
 
 @app.get("/query/GET/non_frauds")
-def get_non_frauds(limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return transaction details coming only from `correct_predictions`.
+def get_non_frauds_route(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return predictions where prediction = False (predicted as non-fraud).
 
-    Transaction details are cleaned to remove sensitive/hidden fields.
+    actual_label may be NULL for unlabeled predictions.
     """
     from dags.utils import database as db
     
-    correct = db.get_incorrect_predictions(limit)
+    predictions = db.get_non_frauds(limit=limit)
+    
     results: List[Dict[str, Any]] = []
-    for r in correct:
-        tx = _clean_transaction_data(r.get("transaction_data") or {})
-        results.append(
-            {
-                "transaction_id": r.get("transaction_id"),
-                "prediction": r.get("prediction"),
-                "actual_label": r.get("actual_label"),
-                "prediction_time": r.get("prediction_time"),
-                "transaction_data": tx,
-            }
-        )
+    for r in predictions:
+        results.append({
+            "id": r.get("prediction_id"),
+            "transaction_id": r.get("transaction_id"),
+            "prediction": r.get("prediction"),
+            "actual_label": r.get("actual_label"),
+            "predict_proba": r.get("predict_proba"),
+            "prediction_time": r.get("prediction_time"),
+            "step": r.get("step"),
+            "type": r.get("type"),
+            "amount": r.get("amount"),
+            "nameOrig": r.get("nameOrig"),
+            "oldbalanceOrg": r.get("oldbalanceOrg"),
+            "newbalanceOrig": r.get("newbalanceOrig"),
+            "nameDest": r.get("nameDest"),
+            "oldbalanceDest": r.get("oldbalanceDest"),
+            "newbalanceDest": r.get("newbalanceDest"),
+            "isFraud": r.get("isFraud"),
+            "isFlaggedFraud": r.get("isFlaggedFraud"),
+        })
     return results
 
 
 @app.get("/query/GET/frauds")
-def get_frauds(limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return transaction details coming only from `incorrect_predictions` (FP and FN).
+def get_frauds_route(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return predictions where prediction = True (predicted as fraud).
 
-    Includes `predict_proba` and cleaned transaction_data.
+    actual_label may be NULL for unlabeled predictions.
     """
     from dags.utils import database as db
     
-    incorrect = db.get_incorrect_predictions(limit)
+    predictions = db.get_frauds(limit=limit)
+    
     results: List[Dict[str, Any]] = []
-    for r in incorrect:
-        tx = _clean_transaction_data(r.get("transaction_data") or {})
-        results.append(
-            {
-                "transaction_id": r.get("transaction_id"),
-                "prediction": r.get("prediction"),
-                "actual_label": r.get("actual_label"),
-                "predict_proba": r.get("predict_proba"),
-                "prediction_time": r.get("prediction_time"),
-                "transaction_data": tx,
-            }
-        )
+    for r in predictions:
+        results.append({
+            "id": r.get("prediction_id"),
+            "transaction_id": r.get("transaction_id"),
+            "prediction": r.get("prediction"),
+            "actual_label": r.get("actual_label"),
+            "predict_proba": r.get("predict_proba"),
+            "prediction_time": r.get("prediction_time"),
+            "step": r.get("step"),
+            "type": r.get("type"),
+            "amount": r.get("amount"),
+            "nameOrig": r.get("nameOrig"),
+            "oldbalanceOrg": r.get("oldbalanceOrg"),
+            "newbalanceOrig": r.get("newbalanceOrig"),
+            "nameDest": r.get("nameDest"),
+            "oldbalanceDest": r.get("oldbalanceDest"),
+            "newbalanceDest": r.get("newbalanceDest"),
+            "isFraud": r.get("isFraud"),
+            "isFlaggedFraud": r.get("isFlaggedFraud"),
+        })
     return results
 
 
 @app.put("/query/PUT/predictions")
-def update_prediction_label(payload: UpdatePredictionRequest) -> Dict[str, int]:
-    """Update the `actual_label` for a prediction record by `transaction_id`.
+def update_prediction_label(payload: UpdatePredictionRequest) -> Dict[str, Any]:
+    """Update the `actual_label` for a prediction record by `prediction_id`.
 
-    This updates whichever table(s) contain the `transaction_id` (correct_predictions
-    and/or incorrect_predictions). It does not move records between tables.
+    This is used after human review to label a prediction.
     """
     from dags.utils import database as db
     
-    tid = payload.transaction_id
-    actual_int = 1 if payload.actual_label else 0
+    prediction_id = payload.transaction_id  # Using transaction_id field as prediction_id
+    actual_label = payload.actual_label
 
-    updated_correct = 0
-    updated_incorrect = 0
+    success = db.update_actual_label(prediction_id, actual_label)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail=f"No prediction record found with id={prediction_id}")
 
-    # Use the context manager from database.py to run two updates in a single transaction
-    with db.get_cursor(commit=True) as cur:
-        cur.execute(
-            "UPDATE correct_predictions SET actual_label = %s WHERE transaction_id = %s",
-            (actual_int, tid),
-        )
-        updated_correct = cur.rowcount
+    return {"updated": True, "prediction_id": prediction_id, "actual_label": actual_label}
 
-        cur.execute(
-            "UPDATE incorrect_predictions SET actual_label = %s WHERE transaction_id = %s",
-            (actual_int, tid),
-        )
-        updated_incorrect = cur.rowcount
 
-    if (updated_correct + updated_incorrect) == 0:
-        raise HTTPException(status_code=404, detail=f"No prediction record found for transaction_id={tid}")
+@app.get("/query/GET/stats")
+def get_prediction_stats() -> Dict[str, Any]:
+    """Get prediction statistics.
 
-    return {"updated_correct": updated_correct, "updated_incorrect": updated_incorrect}
-
+    Returns counts of predictions, labeled/unlabeled, and accuracy.
+    """
+    from dags.utils import database as db
+    
+    return db.get_prediction_stats()
