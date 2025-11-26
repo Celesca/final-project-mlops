@@ -47,6 +47,7 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud123
       POSTGRES_DB: frauddb
     volumes:
       - fraud-db-volume:/var/lib/postgresql/data
