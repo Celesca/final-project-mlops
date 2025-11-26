@@ -72,6 +72,7 @@ MLFLOW_EXPERIMENT = os.getenv("MLFLOW_EXPERIMENT", "fraud_detection_serving")
 MASTER_TABLE_LIMIT = int(os.getenv("MASTER_TABLE_LIMIT", "0"))
 BASELINE_SAMPLE_SIZE = int(os.getenv("BASELINE_SAMPLE_SIZE", "5000"))
 MODEL_IMPROVEMENT_DELTA = float(os.getenv("MODEL_IMPROVEMENT_DELTA", "0.0"))
+TRAINING_DATA_LIMIT = int(os.getenv("TRAINING_DATA_LIMIT", "20000"))
 
 
 @app.on_event("startup")
@@ -119,10 +120,30 @@ async def root():
 
 @app.post("/train", response_model=TrainResponse)
 async def train_endpoint(_: TrainRequest | None = None):
+    """
+    Train a new fraud detection model.
+    
+    Training data source:
+    1. Fetches from predictions table (fraud cases first, then non-fraud)
+    2. Uses actual_label if available (human-labeled), otherwise uses prediction
+    3. Limited to TRAINING_DATA_LIMIT rows (default 20,000)
+    
+    Falls back to master transactions table if no predictions exist.
+    """
     try:
-        master_limit = MASTER_TABLE_LIMIT if MASTER_TABLE_LIMIT > 0 else None
-        master_df = data_access.fetch_master_transactions(limit=master_limit)
-        if master_df.empty:
+        # First, try to get training data from predictions table
+        # This prioritizes fraud cases and uses actual_label when available
+        training_df = data_access.fetch_training_data_from_predictions(
+            total_limit=TRAINING_DATA_LIMIT
+        )
+        
+        if training_df.empty:
+            # Fallback to master transactions if no predictions exist
+            logger.info("No predictions found, falling back to master transactions")
+            master_limit = MASTER_TABLE_LIMIT if MASTER_TABLE_LIMIT > 0 else TRAINING_DATA_LIMIT
+            training_df = data_access.fetch_master_transactions(limit=master_limit)
+        
+        if training_df.empty:
             return TrainResponse(
                 run_id="N/A",
                 val_auc=0.0,
@@ -132,19 +153,25 @@ async def train_endpoint(_: TrainRequest | None = None):
                 message="No data available for training",
             )
 
-        logger.info("Training on %d master rows from Postgres", len(master_df))
+        # Log training data composition
+        fraud_count = training_df['isFraud'].sum() if 'isFraud' in training_df.columns else 0
+        non_fraud_count = len(training_df) - fraud_count
+        logger.info(
+            "Training on %d rows from predictions table (fraud: %d, non-fraud: %d)",
+            len(training_df), fraud_count, non_fraud_count
+        )
 
         result = training.train_new_model(
-            master_df,
+            training_df,
             tracking_uri=MLFLOW_TRACKING_URI,
             experiment_name=MLFLOW_EXPERIMENT,
         )
 
         promoted = _maybe_promote_model(result)
         message = (
-            "New model promoted as serving model"
+            f"New model promoted as serving model (trained on {len(training_df)} rows: {fraud_count} fraud, {non_fraud_count} non-fraud)"
             if promoted
-            else "Model logged to MLflow but not promoted (metric not improved)"
+            else f"Model logged to MLflow but not promoted (metric not improved). Trained on {len(training_df)} rows."
         )
 
         return TrainResponse(

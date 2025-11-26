@@ -128,6 +128,7 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow-server:5000
       MLFLOW_EXPERIMENT: fraud_detection_serving
       BASELINE_SAMPLE_SIZE: "5000"
+      TRAINING_DATA_LIMIT: "20000"
       MODEL_IMPROVEMENT_DELTA: "0.0"
       MASTER_TABLE_LIMIT: "0"
     depends_on:
@@ -143,16 +144,17 @@ services:
     restart: unless-stopped
 
   mlflow-server:
-    image: ghcr.io/mlflow/mlflow:latest
+    image: ghcr.io/mlflow/mlflow:v2.15.0
     command: >
       mlflow server
         --host 0.0.0.0
         --port 5000
         --backend-store-uri sqlite:////mlflow/mlflow.db
         --default-artifact-root /mlruns
-        --allowed-hosts all
+        --serve-artifacts
     environment:
       MLFLOW_TRACKING_URI: http://mlflow-server:5000
+      GUNICORN_CMD_ARGS: "--timeout 120"
     ports:
       - "5000:5000"
     volumes:

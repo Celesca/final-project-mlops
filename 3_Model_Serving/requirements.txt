@@ -13,6 +13,7 @@ psycopg2-binary
 # Model serving
 scikit-learn
 xgboost
+imbalanced-learn
 
 # Model serialization
 joblib
