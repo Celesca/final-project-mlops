@@ -12,3 +12,4 @@ venv/
 */venv/
 /**/venv/**
 kaggle.json
+training_metadata.json

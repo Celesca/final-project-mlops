@@ -168,5 +168,12 @@ def check_data_drift(ds, **kwargs):
     else:
         print(f"✅ No significant drift detected. Data distribution is stable compared to {date_type}.")
     
+    # Update baseline to the latest ingestion date for rolling baseline comparison
+    # This allows each day to be compared against the previous day
+    if not training_date:  # Only update baseline if we're not using training date
+        if latest_ingestion_date != reference_date:
+            print(f"🔄 Updating baseline date from {reference_date} to {latest_ingestion_date} for next comparison.")
+            save_baseline_date(latest_ingestion_date)
+    
     return has_drift
 
