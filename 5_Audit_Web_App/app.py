@@ -227,31 +227,65 @@ def false_cases():
                          false_negatives=false_negatives)
 
 
+def filter_by_label_status(predictions, label_filter):
+    """Filter predictions by label status (all, labeled, pending)."""
+    if label_filter == 'labeled':
+        return [p for p in predictions if p.get('actual_label') is not None]
+    elif label_filter == 'pending':
+        return [p for p in predictions if p.get('actual_label') is None]
+    return predictions  # 'all' or no filter
+
+
 @app.route('/frauds')
 def frauds_list():
-    """Page showing all fraud predictions."""
+    """Page showing all fraud predictions with filter and link to manual labeling."""
+    label_filter = request.args.get('filter', 'all')
     frauds = fetch_frauds()
-    return render_template('predictions_list.html',
-                         predictions=frauds,
+    filtered_frauds = filter_by_label_status(frauds, label_filter)
+    
+    # Add index numbers for display (matching the original list position)
+    for i, fraud in enumerate(filtered_frauds, 1):
+        fraud['display_index'] = i
+    
+    return render_template('frauds_list.html',
+                         predictions=filtered_frauds,
                          title='Fraud Predictions',
-                         prediction_type='fraud')
+                         prediction_type='fraud',
+                         current_filter=label_filter)
 
 
 @app.route('/non_frauds')
 def non_frauds_list():
-    """Page showing all non-fraud predictions."""
+    """Page showing all non-fraud predictions with inline labeling."""
+    label_filter = request.args.get('filter', 'all')
     non_frauds = fetch_non_frauds()
-    return render_template('predictions_list.html',
-                         predictions=non_frauds,
+    filtered_non_frauds = filter_by_label_status(non_frauds, label_filter)
+    
+    return render_template('non_frauds_list.html',
+                         predictions=filtered_non_frauds,
                          title='Non-Fraud Predictions',
-                         prediction_type='non_fraud')
+                         prediction_type='non_fraud',
+                         current_filter=label_filter)
 
 
 @app.route('/manual_labeling')
 def manual_labeling():
-    """Manual labeling interface for unlabeled predictions."""
-    transactions = get_unlabeled_predictions(50)
-    return render_template('manual_labeling.html', transactions=transactions)
+    """Manual labeling interface for FRAUD predictions only."""
+    # Get all fraud predictions that are pending labeling
+    frauds = fetch_frauds()
+    unlabeled_frauds = [f for f in frauds if f.get('actual_label') is None]
+    # Sort by probability (highest first for most interesting cases)
+    unlabeled_frauds.sort(key=lambda x: x.get('predict_proba', 0), reverse=True)
+    
+    # Add original index (position in the full fraud list) for reference
+    all_frauds = fetch_frauds()
+    fraud_id_to_index = {f.get('id') or f.get('transaction_id'): i + 1 for i, f in enumerate(all_frauds)}
+    
+    for fraud in unlabeled_frauds:
+        fraud_id = fraud.get('id') or fraud.get('transaction_id')
+        fraud['original_index'] = fraud_id_to_index.get(fraud_id, 0)
+    
+    return render_template('manual_labeling.html', transactions=unlabeled_frauds[:50])
 
 
 @app.route('/label_transaction', methods=['POST'])
@@ -260,6 +294,7 @@ def label_transaction():
     try:
         prediction_id = request.form.get('prediction_id') or request.form.get('transaction_id')
         manual_label = request.form.get('manual_label') or request.form.get('actual_label')
+        return_to = request.form.get('return_to', 'manual_labeling')
         
         if not prediction_id or manual_label not in ['0', '1', 'true', 'false', 'True', 'False']:
             flash('Invalid data provided', 'error')
@@ -282,7 +317,13 @@ def label_transaction():
         print(f"Error in label_transaction: {e}")
         flash('Error processing request', 'error')
     
-    return redirect(url_for('manual_labeling'))
+    # Redirect based on return_to parameter
+    if return_to == 'non_frauds':
+        return redirect(url_for('non_frauds_list'))
+    elif return_to == 'frauds':
+        return redirect(url_for('frauds_list'))
+    else:
+        return redirect(url_for('manual_labeling'))
 
 
 # ============================================================================

@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - Fraud Detection Audit{% endblock %}
+
+{% block content %}
+<div class="py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>
+            <i class="bi bi-check-circle text-success me-2"></i>
+            {{ title }}
+        </h2>
+        <div class="d-flex align-items-center gap-3">
+            <!-- Filter Dropdown -->
+            <div class="d-flex align-items-center gap-2">
+                <label class="text-muted mb-0">Filter:</label>
+                <select class="form-select form-select-sm" style="width: auto;" 
+                        onchange="window.location.href='{{ url_for('non_frauds_list') }}?filter=' + this.value">
+                    <option value="all" {% if current_filter == 'all' %}selected{% endif %}>All</option>
+                    <option value="pending" {% if current_filter == 'pending' %}selected{% endif %}>Pending</option>
+                    <option value="labeled" {% if current_filter == 'labeled' %}selected{% endif %}>Labeled</option>
+                </select>
+            </div>
+            
+            <span class="badge bg-success fs-6">{{ predictions|length }} predictions</span>
+            
+            <button class="btn btn-outline-primary" onclick="location.reload()">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+        </div>
+    </div>
+
+    {% if predictions %}
+    <div class="card">
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead class="table-light">
+                        <tr>
+                            <th>#</th>
+                            <th>ID</th>
+                            <th>Type</th>
+                            <th>Amount</th>
+                            <th>Origin Account</th>
+                            <th>Destination Account</th>
+                            <th>Probability</th>
+                            <th>Prediction</th>
+                            <th>Actual Label</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in predictions %}
+                        <tr>
+                            <td><strong>{{ loop.index }}</strong></td>
+                            <td><code>{{ p.id or p.transaction_id }}</code></td>
+                            <td>
+                                <span class="badge bg-info">{{ p.type }}</span>
+                            </td>
+                            <td class="amount-cell">${{ "%.2f"|format(p.amount) }}</td>
+                            <td>
+                                <small>{{ p.nameOrig }}</small><br>
+                                <span class="text-muted" style="font-size: 0.75rem;">
+                                    {{ "%.2f"|format(p.oldbalanceOrg) }} → {{ "%.2f"|format(p.newbalanceOrig) }}
+                                </span>
+                            </td>
+                            <td>
+                                <small>{{ p.nameDest }}</small><br>
+                                <span class="text-muted" style="font-size: 0.75rem;">
+                                    {{ "%.2f"|format(p.oldbalanceDest) }} → {{ "%.2f"|format(p.newbalanceDest) }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div class="progress flex-grow-1" style="height: 8px;">
+                                        <div class="progress-bar bg-success" 
+                                             style="width: {{ (p.predict_proba * 100)|int }}%"></div>
+                                    </div>
+                                    <span class="ms-2 small">{{ "%.2f"|format(p.predict_proba) }}</span>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="badge badge-legitimate">LEGIT</span>
+                            </td>
+                            <td>
+                                {% if p.actual_label is not none %}
+                                    {% if p.actual_label %}
+                                    <span class="badge bg-danger">Fraud</span>
+                                    {% else %}
+                                    <span class="badge bg-success">Legit</span>
+                                    {% endif %}
+                                {% else %}
+                                <span class="badge badge-pending">Pending</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if p.actual_label is none %}
+                                <!-- Inline Labeling Buttons for Non-Frauds -->
+                                <div class="btn-group btn-group-sm">
+                                    <form action="{{ url_for('label_transaction') }}" method="POST" class="d-inline">
+                                        <input type="hidden" name="prediction_id" value="{{ p.id or p.transaction_id }}">
+                                        <input type="hidden" name="manual_label" value="1">
+                                        <input type="hidden" name="return_to" value="non_frauds">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm" title="Mark as Fraud">
+                                            <i class="bi bi-x-circle"></i>
+                                        </button>
+                                    </form>
+                                    <form action="{{ url_for('label_transaction') }}" method="POST" class="d-inline">
+                                        <input type="hidden" name="prediction_id" value="{{ p.id or p.transaction_id }}">
+                                        <input type="hidden" name="manual_label" value="0">
+                                        <input type="hidden" name="return_to" value="non_frauds">
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="Mark as Legitimate">
+                                            <i class="bi bi-check-circle"></i>
+                                        </button>
+                                    </form>
+                                </div>
+                                {% else %}
+                                <span class="text-muted">Labeled</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Quick Stats -->
+    <div class="row mt-4">
+        <div class="col-md-4">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h5 class="text-muted">Total Non-Frauds</h5>
+                    <h3>{{ predictions|length }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h5 class="text-muted">Labeled</h5>
+                    <h3 class="text-success">{{ predictions|selectattr('actual_label', 'defined')|selectattr('actual_label', 'ne', none)|list|length }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h5 class="text-muted">Pending</h5>
+                    <h3 class="text-warning">{{ predictions|selectattr('actual_label', 'none')|list|length }}</h3>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle me-2"></i>
+        {% if current_filter == 'pending' %}
+        No pending non-fraud predictions to label. All cases have been reviewed!
+        {% elif current_filter == 'labeled' %}
+        No labeled non-fraud predictions found.
+        {% else %}
+        No non-fraud predictions found.
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
