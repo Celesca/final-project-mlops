@@ -4,6 +4,7 @@ Tasks that interact with the model serving API (train + predict) and persist res
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Dict, List, Any, Iterable
 
 import pandas as pd
@@ -90,9 +91,6 @@ def score_daily_predictions(ds, **context) -> Dict[str, Any]:
         total_scored += len(enriched)
 
         for item in enriched:
-            actual_label = item.get("isFraud")
-            if actual_label is None:
-                continue  # Can't score correctness without label
             prediction = bool(item.get("prediction", 0))
             predict_proba = float(item.get("predict_proba", 0.0))
             tx_key = build_transaction_key(item, ingest_date=ingest_date)
@@ -106,17 +104,19 @@ def score_daily_predictions(ds, **context) -> Dict[str, Any]:
                 tx_lookup[tx_key] = transaction_id
                 lookup_misses += 1
 
+            # Store prediction with actual_label as NULL (unknown at prediction time)
+            # actual_label will be updated later via human review
             save_prediction(
                 transaction_id=transaction_id,
                 prediction=prediction,
-                actual_label=bool(actual_label),
                 predict_proba=predict_proba,
+                prediction_time=datetime.utcnow(),
             )
             stored_predictions += 1
 
     if lookup_misses:
         print(f"ℹ️ Added {lookup_misses} missing transactions while storing predictions.")
-    print(f"✅ Scored {total_scored} rows; stored {stored_predictions} labelled predictions.")
+    print(f"✅ Scored {total_scored} rows; stored {stored_predictions} predictions (actual_label=NULL).")
     return {
         "scored_rows": total_scored,
         "stored_predictions": stored_predictions,

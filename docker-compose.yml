@@ -150,9 +150,9 @@ services:
         --port 5000
         --backend-store-uri sqlite:////mlflow/mlflow.db
         --default-artifact-root /mlruns
+        --allowed-hosts all
     environment:
       MLFLOW_TRACKING_URI: http://mlflow-server:5000
-      MLFLOW_ALLOWED_HOSTS: "mlflow-server,localhost,127.0.0.1,0.0.0.0"
     ports:
       - "5000:5000"
     volumes:
