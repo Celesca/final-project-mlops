@@ -84,7 +84,8 @@ def fetch_training_data_from_predictions(total_limit: int = 20000) -> pd.DataFra
             t.step, t.type, t.amount, 
             t."nameOrig", t."oldbalanceOrg", t."newbalanceOrig",
             t."nameDest", t."oldbalanceDest", t."newbalanceDest",
-            t."isFlaggedFraud"
+            t."isFlaggedFraud",
+            t.ingest_date
         FROM predictions p
         JOIN all_transactions t ON p.transaction_id = t.id
         WHERE p.prediction = TRUE
@@ -101,7 +102,8 @@ def fetch_training_data_from_predictions(total_limit: int = 20000) -> pd.DataFra
             t.step, t.type, t.amount, 
             t."nameOrig", t."oldbalanceOrg", t."newbalanceOrig",
             t."nameDest", t."oldbalanceDest", t."newbalanceDest",
-            t."isFlaggedFraud"
+            t."isFlaggedFraud",
+            t.ingest_date
         FROM predictions p
         JOIN all_transactions t ON p.transaction_id = t.id
         WHERE p.prediction = FALSE
@@ -141,6 +143,7 @@ def fetch_training_data_from_predictions(total_limit: int = 20000) -> pd.DataFra
     combined_df['isFraud'] = combined_df['isFraud'].astype(int)
     
     # Drop the prediction and actual_label columns as they're not needed for training
+    # Keep ingest_date for determining training date
     training_df = combined_df.drop(columns=['prediction', 'actual_label', 'predict_proba'])
     
     return training_df

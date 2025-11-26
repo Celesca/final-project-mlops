@@ -19,7 +19,7 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from model_serving.model import FraudDetectionModel
-from model_serving import preprocessing, data_access, training
+from model_serving import preprocessing, data_access, training, training_metadata
 from model_serving.schemas import (
     TrainRequest,
     TrainResponse,
@@ -171,6 +171,25 @@ async def train_endpoint(_: TrainRequest | None = None):
         promotion_result = _maybe_promote_model(result, training_df=training_df)
         promoted = promotion_result["promoted"]
         message = promotion_result["message"]
+        
+        # Save training date (latest ingest_date from training data)
+        if 'ingest_date' in training_df.columns and not training_df['ingest_date'].isna().all():
+            # Get the latest (max) ingest_date from training data
+            latest_training_date = training_df['ingest_date'].dropna().max()
+            if latest_training_date:
+                # Convert to string if it's not already
+                if hasattr(latest_training_date, 'strftime'):
+                    latest_training_date = latest_training_date.strftime('%Y-%m-%d')
+                elif isinstance(latest_training_date, str):
+                    # If it's already a string, use it directly
+                    pass
+                else:
+                    latest_training_date = str(latest_training_date)
+                
+                training_metadata.save_training_date(latest_training_date)
+                logger.info(f"Saved training date: {latest_training_date}")
+        else:
+            logger.warning("No ingest_date found in training data, cannot save training date")
         
         # Add training data info to message
         message += f" Trained on {len(training_df)} rows ({fraud_count} fraud, {non_fraud_count} non-fraud)."
