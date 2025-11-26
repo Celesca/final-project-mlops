@@ -10,16 +10,15 @@ from enum import Enum as _Enum
 from .schemas import TRANSAC_TYPE, ALLOWED_TRANSAC_TYPES
 
 FEATURE_COLUMNS = [
-    "transac_type",
+    "type",
     "amount",
-    "src_bal",
-    "src_new_bal",
-    "dst_bal",
-    "dst_new_bal",
+    'oldbalanceOrg', 
+    'newbalanceOrig', 
+    'oldbalanceDest', 
+    'newbalanceDest'
 ]
 
-NUMERIC_FEATURES = ["amount", "src_bal", "src_new_bal", "dst_bal", "dst_new_bal"]
-
+NUMERIC_FEATURES = ["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]
 
 def parse_time_features(time_ind: str) -> Dict[str, Any]:
     try:
@@ -59,7 +58,7 @@ def transaction_to_features(transaction: Dict[str, Any]) -> Dict[str, Any]:
     features: Dict[str, Any] = {}
     features["amount"] = transaction.get("amount")
 
-    time_ind = transaction.get("time_ind")
+    time_ind = transaction.get("step")
     if time_ind is not None:
         time_feats = parse_time_features(str(time_ind))
         features.update(time_feats)
@@ -87,13 +86,15 @@ def build_feature_source_from_master(df: pd.DataFrame) -> pd.DataFrame:
         return pd.Series([None] * len(work))
 
     feature_df = pd.DataFrame()
-    feature_df["transac_type"] = _coalesce("transac_type", "type")
+    # Align output columns exactly with FEATURE_COLUMNS expected by the model
+    feature_df["type"] = _coalesce("type", "transac_type")
     feature_df["amount"] = _coalesce("amount")
-    feature_df["src_bal"] = _coalesce("src_bal", "oldbalanceOrg")
-    feature_df["src_new_bal"] = _coalesce("src_new_bal", "newbalanceOrig")
-    feature_df["dst_bal"] = _coalesce("dst_bal", "oldbalanceDest")
-    feature_df["dst_new_bal"] = _coalesce("dst_new_bal", "newbalanceDest")
+    feature_df["oldbalanceOrg"] = _coalesce("oldbalanceOrg", "src_bal")
+    feature_df["newbalanceOrig"] = _coalesce("newbalanceOrig", "src_new_bal")
+    feature_df["oldbalanceDest"] = _coalesce("oldbalanceDest", "dst_bal")
+    feature_df["newbalanceDest"] = _coalesce("newbalanceDest", "dst_new_bal")
 
+    # Return columns in the exact order/name expected downstream
     return feature_df[FEATURE_COLUMNS]
 
 
@@ -113,14 +114,15 @@ def prepare_feature_frame(
     if working.empty:
         return working, artifacts
 
-    if "transac_type" not in working.columns:
-        raise ValueError("Expected 'transac_type' column in feature dataframe")
+    # Expect the column named 'type' (matches FEATURE_COLUMNS)
+    if "type" not in working.columns:
+        raise ValueError("Expected 'type' column in feature dataframe")
 
-    working["transac_type"] = working["transac_type"].apply(_normalize_transac_type)
-    working["transac_type"] = pd.Categorical(
-        working["transac_type"], categories=ALLOWED_TRANSAC_TYPES
+    working["type"] = working["type"].apply(_normalize_transac_type)
+    working["type"] = pd.Categorical(
+        working["type"], categories=ALLOWED_TRANSAC_TYPES
     )
-    working = pd.get_dummies(working, columns=["transac_type"], drop_first=True)
+    working = pd.get_dummies(working, columns=["type"], drop_first=True)
 
     if fit:
         train_cols = list(working.columns)
@@ -164,15 +166,15 @@ def prepare_feature_frame(
 def _transaction_to_feature_row(transaction: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize a transaction dict into the expected feature row schema."""
     row: Dict[str, Any] = {}
-    t_type = transaction.get("transac_type") or transaction.get("type")
+    t_type = transaction.get("type") or transaction.get("transac_type")
     if isinstance(t_type, _Enum):
         t_type = t_type.value
-    row["transac_type"] = _normalize_transac_type(t_type)
+    row["type"] = _normalize_transac_type(t_type)
     row["amount"] = transaction.get("amount")
-    row["src_bal"] = transaction.get("src_bal", transaction.get("oldbalanceOrg"))
-    row["src_new_bal"] = transaction.get("src_new_bal", transaction.get("newbalanceOrig"))
-    row["dst_bal"] = transaction.get("dst_bal", transaction.get("oldbalanceDest"))
-    row["dst_new_bal"] = transaction.get("dst_new_bal", transaction.get("newbalanceDest"))
+    row["oldbalanceOrg"] = transaction.get("oldbalanceOrg", transaction.get("src_bal"))
+    row["newbalanceOrig"] = transaction.get("newbalanceOrig", transaction.get("src_new_bal"))
+    row["oldbalanceDest"] = transaction.get("oldbalanceDest", transaction.get("dst_bal"))
+    row["newbalanceDest"] = transaction.get("newbalanceDest", transaction.get("dst_new_bal"))
     return row
 
 

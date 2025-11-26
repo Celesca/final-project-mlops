@@ -1,1 +1,1 @@
-["amount", "src_bal", "src_new_bal", "dst_bal", "dst_new_bal", "transac_type_TRANSFER"]
+["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest", "type_CASH_OUT", "type_DEBIT", "type_PAYMENT", "type_TRANSFER"]
