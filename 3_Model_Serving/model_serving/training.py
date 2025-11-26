@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 import tempfile
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 
 import joblib
@@ -32,6 +32,7 @@ class TrainingResult:
     artifacts: Dict[str, Any]
     metrics: Dict[str, float]
     run_id: str
+    model_version: Optional[str]  # Format: "model_name/version"
     train_rows: int
     val_rows: int
     feature_count: int
@@ -59,9 +60,10 @@ def _log_to_mlflow(
     train_rows: int,
     val_rows: int,
     feature_count: int,
-) -> str:
-    """Log model and metrics to MLflow. Returns run_id."""
+) -> tuple[str, Optional[str]]:
+    """Log model and metrics to MLflow. Returns (run_id, model_version)."""
     import mlflow
+    from mlflow.tracking import MlflowClient
     
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     
@@ -101,15 +103,16 @@ def _log_to_mlflow(
                     json.dump(artifacts["train_cols"], f)
                 mlflow.log_artifact(tmp_cols_path, artifact_path="preprocessing")
         
-        # Log sklearn model for easy loading
-        mlflow.sklearn.log_model(
+        # Log sklearn model for easy loading and register in Model Registry
+        model_version = mlflow.sklearn.log_model(
             model, 
             artifact_path="sklearn-model",
             registered_model_name="fraud-detection-xgboost"
         )
         
-        logger.info(f"Logged run {run.info.run_id} to MLflow")
-        return run.info.run_id
+        model_version_str = f"{model_version.name}/{model_version.version}" if model_version else None
+        logger.info(f"Logged run {run.info.run_id} to MLflow and registered model version {model_version_str}")
+        return run.info.run_id, model_version_str
 
 
 def train_new_model(
@@ -207,11 +210,12 @@ def train_new_model(
 
     # Try to log to MLflow
     run_id = "local"
+    model_version = None
     mlflow_success = _setup_mlflow(tracking_uri, experiment_name)
     
     if mlflow_success:
         try:
-            run_id = _log_to_mlflow(
+            run_id, model_version = _log_to_mlflow(
                 model=model,
                 artifacts=artifacts,
                 metrics=metrics,
@@ -231,6 +235,7 @@ def train_new_model(
         artifacts=artifacts,
         metrics=metrics,
         run_id=run_id,
+        model_version=model_version,
         train_rows=len(X_train),
         val_rows=len(X_val),
         feature_count=features.shape[1],

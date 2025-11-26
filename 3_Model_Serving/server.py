@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 from pathlib import Path
 import os
@@ -75,12 +75,80 @@ MODEL_IMPROVEMENT_DELTA = float(os.getenv("MODEL_IMPROVEMENT_DELTA", "0.0"))
 TRAINING_DATA_LIMIT = int(os.getenv("TRAINING_DATA_LIMIT", "20000"))
 
 
+def _load_best_model_from_registry() -> Optional[Tuple[Any, Dict[str, Any], float]]:
+    """Try to load the best Production model from MLflow Model Registry.
+    
+    Returns:
+        Tuple of (model, artifacts, metric) if successful, None otherwise.
+    """
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        
+        client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
+        model_name = "fraud-detection-xgboost"
+        
+        # Get latest Production model
+        try:
+            production_versions = client.get_latest_versions(
+                model_name,
+                stages=["Production"]
+            )
+            if not production_versions:
+                logger.info("No Production model found in MLflow Model Registry")
+                return None
+            
+            # Get the latest Production version
+            latest_prod = production_versions[0]
+            logger.info(f"Found Production model in registry: {model_name}/{latest_prod.version}")
+            
+            # Load model from MLflow
+            model_uri = f"models:/{model_name}/Production"
+            loaded_model = mlflow.sklearn.load_model(model_uri)
+            
+            # Try to load artifacts from the run
+            run = client.get_run(latest_prod.run_id)
+            artifacts = {}
+            
+            # Extract metrics
+            metric = run.data.metrics.get("val_auc", 0.0)
+            
+            logger.info(f"Loaded Production model from MLflow (AUC: {metric:.4f})")
+            return (loaded_model, artifacts, metric)
+            
+        except Exception as e:
+            logger.warning(f"Failed to load model from MLflow registry: {e}")
+            return None
+            
+    except ImportError:
+        logger.info("MLflow not available, skipping registry model load")
+        return None
+    except Exception as e:
+        logger.warning(f"Error accessing MLflow registry: {e}")
+        return None
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Load artifacts and model; establish baseline metric if possible."""
+    """Load artifacts and model; establish baseline metric if possible.
+    
+    Tries to load from MLflow Model Registry first, falls back to local files.
+    """
     artifacts = preprocessing.load_preprocessing_artifacts(ARTIFACTS_PATH.as_posix())
     model = FraudDetectionModel()
-    if model.model is None and CANONICAL_MODEL_PATH.exists():
+    
+    # Try to load best model from MLflow Model Registry
+    registry_result = _load_best_model_from_registry()
+    if registry_result:
+        registry_model, registry_artifacts, registry_metric = registry_result
+        # Use registry model if available, but still prefer local artifacts if they exist
+        if registry_artifacts:
+            artifacts = registry_artifacts
+        model.model = registry_model
+        best_metric = registry_metric
+        logger.info("Using Production model from MLflow Model Registry")
+    elif model.model is None and CANONICAL_MODEL_PATH.exists():
+        # Fallback to local model
         try:
             model.load(CANONICAL_MODEL_PATH.as_posix())
             logger.info("Loaded model from %s", CANONICAL_MODEL_PATH)
@@ -245,16 +313,25 @@ def _maybe_promote_model(result: training.TrainingResult) -> bool:
         )
         return False
 
+    # Save model locally
     joblib.dump(result.model, CANONICAL_MODEL_PATH)
     joblib.dump(result.artifacts, ARTIFACTS_PATH)
     if result.artifacts.get("train_cols"):
         with open(TRAIN_COLS_PATH, "w", encoding="utf-8") as f:
             json.dump(result.artifacts["train_cols"], f)
 
+    # Transition model to Production stage in MLflow Model Registry
+    if result.model_version:
+        try:
+            _transition_model_to_production(result.model_version)
+        except Exception as e:
+            logger.warning(f"Failed to transition model to Production in MLflow: {e}")
+
     _save_model_meta(
         {
             "val_auc": candidate_metric,
             "run_id": result.run_id,
+            "model_version": result.model_version,
             "updated_at": datetime.utcnow().isoformat(),
         }
     )
@@ -263,6 +340,59 @@ def _maybe_promote_model(result: training.TrainingResult) -> bool:
     app.state.model.load(CANONICAL_MODEL_PATH.as_posix())
     logger.info("Promoted new model (AUC=%.4f) from run %s", candidate_metric, result.run_id)
     return True
+
+
+def _transition_model_to_production(model_version: str) -> None:
+    """Transition a model version to Production stage in MLflow Model Registry.
+    
+    Also archives any previous Production models to Archived stage.
+    
+    Args:
+        model_version: Model version string in format "model_name/version"
+    """
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        
+        client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
+        
+        # Parse model name and version
+        parts = model_version.split("/")
+        if len(parts) != 2:
+            logger.warning(f"Invalid model_version format: {model_version}")
+            return
+        
+        model_name, version_str = parts
+        
+        # Archive any existing Production models
+        try:
+            production_versions = client.get_latest_versions(
+                model_name, 
+                stages=["Production"]
+            )
+            for pv in production_versions:
+                if pv.version != version_str:
+                    client.transition_model_version_stage(
+                        name=model_name,
+                        version=pv.version,
+                        stage="Archived"
+                    )
+                    logger.info(f"Archived previous Production model: {model_name}/{pv.version}")
+        except Exception as e:
+            logger.warning(f"Failed to archive previous Production models: {e}")
+        
+        # Transition new model to Production
+        client.transition_model_version_stage(
+            name=model_name,
+            version=version_str,
+            stage="Production"
+        )
+        logger.info(f"Transitioned model {model_version} to Production stage in MLflow Model Registry")
+        
+    except ImportError:
+        logger.warning("MLflow not available, skipping model registry transition")
+    except Exception as e:
+        logger.warning(f"Failed to transition model to Production: {e}")
 
 
 def _load_model_meta() -> Optional[Dict[str, Any]]:
