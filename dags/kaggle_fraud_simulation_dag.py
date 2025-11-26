@@ -29,11 +29,11 @@ default_args = {
 with DAG(
     "kaggle_fraud_simulation_daily",
     default_args=default_args,
-    description="Daily fraud detection data ingestion with optional partitioning",
-    schedule="@daily",
-    catchup=True,  # Set to True if you want to backfill from start_date to today
+    description="Fraud detection data ingestion pipeline (simulation mode: runs every 5 minutes)",
+    schedule=timedelta(minutes=5),  # Run every 5 minutes for simulation
+    catchup=False,  # Disable catchup for simulation to avoid backfilling
     max_active_runs=1,
-    tags=["fraud-detection", "kaggle", "data-ingestion"]
+    tags=["fraud-detection", "kaggle", "data-ingestion", "simulation"]
 ) as dag:
     
     # Task 0: Setup database (runs first, idempotent)

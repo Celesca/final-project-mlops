@@ -140,11 +140,31 @@ def check_data_drift(ds, **kwargs):
         print(f"⚠️ No common columns between {date_type} and latest ingestion data.")
         return
 
-    reference_data = reference_data[common_columns]
-    current_data = current_data[common_columns]
+    # Exclude target variables and metadata columns from drift detection
+    # We only want to detect drift in features, not in labels or metadata
+    columns_to_exclude = {
+        'isFraud', 'isFlaggedFraud',  # Target variables
+        'ingest_date', 'source_file',  # Metadata columns
+        'step'  # Time step (if present, as it's sequential and will always drift)
+    }
+    
+    # Filter to feature columns only (exclude target and metadata)
+    feature_columns = [col for col in common_columns if col not in columns_to_exclude]
+    
+    if not feature_columns:
+        print(f"⚠️ No feature columns available after excluding target/metadata columns.")
+        return
+
+    reference_data = reference_data[feature_columns]
+    current_data = current_data[feature_columns]
+
+    excluded_count = len(common_columns) - len(feature_columns)
+    if excluded_count > 0:
+        excluded_cols = [col for col in common_columns if col in columns_to_exclude]
+        print(f"ℹ️ Excluded {excluded_count} target/metadata column(s) from drift detection: {excluded_cols}")
 
     print(f"📊 Comparing data: {date_type.capitalize()} ({reference_date}, {len(reference_data)} rows) vs Latest ingestion ({latest_ingestion_date}, {len(current_data)} rows)")
-    print(f"📋 Columns being checked: {len(common_columns)} columns")
+    print(f"📋 Columns being checked: {len(feature_columns)} feature columns")
     
     # Check for drift
     has_drift = is_drift_critical(
