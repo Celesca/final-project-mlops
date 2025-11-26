@@ -69,6 +69,11 @@ def score_daily_predictions(ds, **context) -> Dict[str, Any]:
         print("⚠️ Daily dataframe is empty; skipping prediction step.")
         return {"scored_rows": 0}
 
+    # Limit to 2000 rows for processing
+    if len(df) > 2000:
+        print(f"⚠️ Limiting dataframe from {len(df)} rows to 2000 rows for processing.")
+        df = df.head(2000)
+
     ingest_date = ingestion_output.get("ingest_date")
     if not ingest_date:
         raise ValueError("Ingest date missing; cannot map predictions to transactions.")
