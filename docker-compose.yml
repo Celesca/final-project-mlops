@@ -51,6 +51,7 @@ services:
       POSTGRES_DB: frauddb
     volumes:
       - fraud-db-volume:/var/lib/postgresql/data
+      - ./db_init:/docker-entrypoint-initdb.d:ro
     ports:
       - "5433:5432"
     healthcheck:
@@ -60,19 +61,19 @@ services:
       timeout: 5s
     restart: always
 
-  pgadmin:
-    image: dpage/pgadmin4:8
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@example.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-    ports:
-      - "5050:80"
-    depends_on:
-      fraud-db:
-        condition: service_healthy
-    volumes:
-      - pgadmin-data:/var/lib/pgadmin
-    restart: unless-stopped
+  # pgadmin:
+  #   image: dpage/pgadmin4:8
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: admin@example.com
+  #     PGADMIN_DEFAULT_PASSWORD: admin
+  #   ports:
+  #     - "5050:80"
+  #   depends_on:
+  #     fraud-db:
+  #       condition: service_healthy
+  #   volumes:
+  #     - pgadmin-data:/var/lib/pgadmin
+  #   restart: unless-stopped
 
   airflow-webserver:
     <<: *airflow-common
@@ -136,6 +137,7 @@ services:
         condition: service_started
     volumes:
       - ./3_Model_Serving/models:/app/models
+      - ./dags:/app/dags
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -150,6 +152,7 @@ services:
         --default-artifact-root /mlruns
     environment:
       MLFLOW_TRACKING_URI: http://mlflow-server:5000
+      MLFLOW_ALLOWED_HOSTS: "mlflow-server,localhost,127.0.0.1,0.0.0.0"
     ports:
       - "5000:5000"
     volumes:
@@ -160,6 +163,6 @@ services:
 volumes:
   postgres-db-volume:
   fraud-db-volume:
-  pgadmin-data:
+  # pgadmin-data:
   mlruns:
   mlflow-backend:

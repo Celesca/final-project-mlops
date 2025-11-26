@@ -5,11 +5,18 @@ from pathlib import Path
 import os
 import json
 import logging
+import sys
 
 import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
+from pydantic import BaseModel
+
+# Ensure repository root is on sys.path so `dags` package can be imported
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 from model_serving.model import FraudDetectionModel
 from model_serving import preprocessing, data_access, training
@@ -20,6 +27,7 @@ from model_serving.schemas import (
     EnrichedTransaction,
     MasterTransaction,
 )
+
 
 app = FastAPI(
     title="Fraud Detection API",
@@ -34,6 +42,21 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+# Query API routes for predictions
+class UpdatePredictionRequest(BaseModel):
+    transaction_id: int
+    actual_label: bool
+
+
+def _clean_transaction_data(txn: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove sensitive/undeclared fields from transaction_data per request.
+
+    We drop: `isFraud`, `isFlaggedFraud`, `ingest_date`, `source_file`.
+    """
+    if not txn:
+        return {}
+    return {k: v for k, v in txn.items() if k not in {"isFraud", "isFlaggedFraud", "ingest_date", "source_file"}}
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "models"
@@ -100,7 +123,14 @@ async def train_endpoint(_: TrainRequest | None = None):
         master_limit = MASTER_TABLE_LIMIT if MASTER_TABLE_LIMIT > 0 else None
         master_df = data_access.fetch_master_transactions(limit=master_limit)
         if master_df.empty:
-            raise HTTPException(status_code=400, detail="No data available for training")
+            return TrainResponse(
+                run_id="N/A",
+                val_auc=0.0,
+                val_accuracy=0.0,
+                promoted=False,
+                model_path=None,
+                message="No data available for training",
+            )
 
         logger.info("Training on %d master rows from Postgres", len(master_df))
 
@@ -245,8 +275,135 @@ def _evaluate_against_master(
     return float(auc)
 
 
-if __name__ == "__main__":
-    import uvicorn
+@app.get("/query/GET/predictions")
+def get_predictions(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return joined predictions from correct and incorrect prediction tables.
 
-    logger.info("Starting uvicorn server on 0.0.0.0:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+    Each record includes prediction metadata and cleaned `transaction_data`.
+    """
+    from dags.utils import database as db
+    
+    correct = db.get_correct_predictions(limit)
+    incorrect = db.get_incorrect_predictions(limit)
+
+    combined: List[Dict[str, Any]] = []
+
+    for r in correct:
+        tx = _clean_transaction_data(r.get("transaction_data") or {})
+        combined.append(
+            {
+                "id": r.get("id"),
+                "transaction_id": r.get("transaction_id"),
+                "prediction": r.get("prediction"),
+                "actual_label": r.get("actual_label"),
+                "prediction_time": r.get("prediction_time"),
+                "created_at": r.get("created_at"),
+                "transaction_data": tx,
+                "source": "correct",
+            }
+        )
+
+    for r in incorrect:
+        tx = _clean_transaction_data(r.get("transaction_data") or {})
+        combined.append(
+            {
+                "id": r.get("id"),
+                "transaction_id": r.get("transaction_id"),
+                "prediction": r.get("prediction"),
+                "actual_label": r.get("actual_label"),
+                "predict_proba": r.get("predict_proba"),
+                "prediction_time": r.get("prediction_time"),
+                "created_at": r.get("created_at"),
+                "transaction_data": tx,
+                "source": "incorrect",
+            }
+        )
+
+    # sort by prediction_time (descending) when available
+    combined.sort(key=lambda x: x.get("prediction_time") or "", reverse=True)
+    return combined
+
+
+@app.get("/query/GET/non_frauds")
+def get_non_frauds(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return transaction details coming only from `correct_predictions`.
+
+    Transaction details are cleaned to remove sensitive/hidden fields.
+    """
+    from dags.utils import database as db
+    
+    correct = db.get_incorrect_predictions(limit)
+    results: List[Dict[str, Any]] = []
+    for r in correct:
+        tx = _clean_transaction_data(r.get("transaction_data") or {})
+        results.append(
+            {
+                "transaction_id": r.get("transaction_id"),
+                "prediction": r.get("prediction"),
+                "actual_label": r.get("actual_label"),
+                "prediction_time": r.get("prediction_time"),
+                "transaction_data": tx,
+            }
+        )
+    return results
+
+
+@app.get("/query/GET/frauds")
+def get_frauds(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return transaction details coming only from `incorrect_predictions` (FP and FN).
+
+    Includes `predict_proba` and cleaned transaction_data.
+    """
+    from dags.utils import database as db
+    
+    incorrect = db.get_incorrect_predictions(limit)
+    results: List[Dict[str, Any]] = []
+    for r in incorrect:
+        tx = _clean_transaction_data(r.get("transaction_data") or {})
+        results.append(
+            {
+                "transaction_id": r.get("transaction_id"),
+                "prediction": r.get("prediction"),
+                "actual_label": r.get("actual_label"),
+                "predict_proba": r.get("predict_proba"),
+                "prediction_time": r.get("prediction_time"),
+                "transaction_data": tx,
+            }
+        )
+    return results
+
+
+@app.put("/query/PUT/predictions")
+def update_prediction_label(payload: UpdatePredictionRequest) -> Dict[str, int]:
+    """Update the `actual_label` for a prediction record by `transaction_id`.
+
+    This updates whichever table(s) contain the `transaction_id` (correct_predictions
+    and/or incorrect_predictions). It does not move records between tables.
+    """
+    from dags.utils import database as db
+    
+    tid = payload.transaction_id
+    actual_int = 1 if payload.actual_label else 0
+
+    updated_correct = 0
+    updated_incorrect = 0
+
+    # Use the context manager from database.py to run two updates in a single transaction
+    with db.get_cursor(commit=True) as cur:
+        cur.execute(
+            "UPDATE correct_predictions SET actual_label = %s WHERE transaction_id = %s",
+            (actual_int, tid),
+        )
+        updated_correct = cur.rowcount
+
+        cur.execute(
+            "UPDATE incorrect_predictions SET actual_label = %s WHERE transaction_id = %s",
+            (actual_int, tid),
+        )
+        updated_incorrect = cur.rowcount
+
+    if (updated_correct + updated_incorrect) == 0:
+        raise HTTPException(status_code=404, detail=f"No prediction record found for transaction_id={tid}")
+
+    return {"updated_correct": updated_correct, "updated_incorrect": updated_incorrect}
+

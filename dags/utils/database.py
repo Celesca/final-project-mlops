@@ -206,8 +206,14 @@ TRANSACTION_RESULT_COLUMNS = MASTER_TX_COLUMNS + ["ingest_date", "source_file"]
 
 
 def _alias_column(column: str, table_alias: str = "at") -> str:
-    db_column = column if column.islower() else column.lower()
-    return f'{table_alias}.{db_column} AS "{column}"'
+    # If the logical column name contains uppercase letters we must quote
+    # the identifier in SQL so Postgres matches the exact mixed-case name
+    # (some deployments use quoted mixed-case column names). For plain
+    # lowercase names use the unquoted form.
+    if column.islower():
+        return f'{table_alias}.{column} AS "{column}"'
+    else:
+        return f'{table_alias}."{column}" AS "{column}"'
 
 
 TRANSACTION_RESULT_SELECT = ", ".join(_alias_column(col) for col in TRANSACTION_RESULT_COLUMNS)
@@ -268,7 +274,7 @@ def _extract_master_row(transaction: Dict) -> List:
     for col in MASTER_TX_COLUMNS:
         value = transaction.get(col)
         if col in {"isFraud", "isFlaggedFraud"} and value is not None:
-            value = int(bool(value))
+            value = bool(value)
         row.append(value)
     return row
 
@@ -288,8 +294,8 @@ def save_transaction_record(
         cursor.execute(
             """
             INSERT INTO all_transactions (
-                step, type, amount, nameOrig, oldbalanceOrg, newbalanceOrig,
-                nameDest, oldbalanceDest, newbalanceDest, isFraud, isFlaggedFraud,
+                step, type, amount, "nameOrig", "oldbalanceOrg", "newbalanceOrig",
+                "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud",
                 ingest_date, source_file
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -323,8 +329,8 @@ def save_transactions_bulk(
             cursor,
             """
             INSERT INTO all_transactions (
-                step, type, amount, nameOrig, oldbalanceOrg, newbalanceOrig,
-                nameDest, oldbalanceDest, newbalanceDest, isFraud, isFlaggedFraud,
+                step, type, amount, "nameOrig", "oldbalanceOrg", "newbalanceOrig",
+                "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud",
                 ingest_date, source_file
             )
             VALUES %s
@@ -396,9 +402,10 @@ def get_transactions(
     Returns:
         List of transaction dictionaries
     """
+    # Use quoted identifiers for mixed-case columns to match the DB init SQL
     query = """
-        SELECT id, step, type, amount, nameOrig, oldbalanceOrg, newbalanceOrig,
-               nameDest, oldbalanceDest, newbalanceDest, isFraud, isFlaggedFraud,
+        SELECT id, step, type, amount, "nameOrig", "oldbalanceOrg", "newbalanceOrig",
+               "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud",
                ingest_date, source_file, created_at
         FROM all_transactions
     """
@@ -428,14 +435,14 @@ def get_transactions(
             "step": row["step"],
             "type": row["type"],
             "amount": row["amount"],
-            "nameOrig": row["nameorig"],
-            "oldbalanceOrg": row["oldbalanceorg"],
-            "newbalanceOrig": row["newbalanceorig"],
-            "nameDest": row["namedest"],
-            "oldbalanceDest": row["oldbalancedest"],
-            "newbalanceDest": row["newbalancedest"],
-            "isFraud": row["isfraud"],
-            "isFlaggedFraud": row["isflaggedfraud"],
+            "nameOrig": row.get("nameOrig") if "nameOrig" in row else row.get("nameorig"),
+            "oldbalanceOrg": row.get("oldbalanceOrg") if "oldbalanceOrg" in row else row.get("oldbalanceorg"),
+            "newbalanceOrig": row.get("newbalanceOrig") if "newbalanceOrig" in row else row.get("newbalanceorig"),
+            "nameDest": row.get("nameDest") if "nameDest" in row else row.get("namedest"),
+            "oldbalanceDest": row.get("oldbalanceDest") if "oldbalanceDest" in row else row.get("oldbalancedest"),
+            "newbalanceDest": row.get("newbalanceDest") if "newbalanceDest" in row else row.get("newbalancedest"),
+            "isFraud": bool(row.get("isFraud") if "isFraud" in row else row.get("isfraud")),
+            "isFlaggedFraud": bool(row.get("isFlaggedFraud") if "isFlaggedFraud" in row else row.get("isflaggedfraud")),
             "ingest_date": row["ingest_date"],
             "source_file": row["source_file"],
             "created_at": row["created_at"],
