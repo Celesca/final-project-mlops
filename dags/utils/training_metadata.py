@@ -132,6 +132,37 @@ def get_baseline_date() -> Optional[str]:
         return None
 
 
+def clear_baseline_date() -> None:
+    """
+    Clear/remove the baseline date from metadata.
+    Useful for resetting drift detection when starting a new simulation.
+    """
+    metadata_path = get_training_metadata_path()
+    
+    if not os.path.exists(metadata_path):
+        print("ℹ️ No metadata file found. Nothing to clear.")
+        return
+    
+    try:
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"⚠️ Error reading training metadata: {e}")
+        return
+    
+    if 'baseline_date' in metadata:
+        del metadata['baseline_date']
+        if 'baseline_last_updated' in metadata:
+            del metadata['baseline_last_updated']
+        
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"✅ Cleared baseline date from {metadata_path}")
+    else:
+        print("ℹ️ No baseline date found in metadata. Nothing to clear.")
+
+
 def get_next_simulation_day() -> int:
     """
     Get the next simulation day to process and increment the counter.

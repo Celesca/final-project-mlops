@@ -32,25 +32,26 @@ def _get_latest_ingestion_date() -> str:
     if not files:
         return None
     
-    # Extract dates from filenames
-    dates = []
+    # Extract dates from filenames and parse them properly
+    date_objects = []
     for file in files:
         filename = os.path.basename(file)
         # Extract date from processed_fraud_data_{date}.parquet or .csv
         if filename.startswith("processed_fraud_data_") and (filename.endswith(".parquet") or filename.endswith(".csv")):
             date_str = filename.replace("processed_fraud_data_", "").replace(".parquet", "").replace(".csv", "")
             try:
-                # Validate date format
-                dt.strptime(date_str, "%Y-%m-%d")
-                dates.append(date_str)
+                # Parse and validate date format
+                date_obj = dt.strptime(date_str, "%Y-%m-%d")
+                date_objects.append((date_obj, date_str))
             except ValueError:
                 continue
     
-    if not dates:
+    if not date_objects:
         return None
     
-    # Return the latest (max) date
-    return max(dates)
+    # Return the latest date by comparing date objects, not strings
+    latest_date_obj, latest_date_str = max(date_objects, key=lambda x: x[0])
+    return latest_date_str
 
 
 def check_data_drift(ds, **kwargs):

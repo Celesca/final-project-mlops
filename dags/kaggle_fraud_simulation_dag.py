@@ -23,7 +23,7 @@ default_args = {
     "depends_on_past": False,
     "start_date": datetime.strptime(DAG_START_DATE, "%Y-%m-%d"),
     "retries": 1,
-    "retry_delay": timedelta(minutes=5),
+    "retry_delay": timedelta(minutes=3),
 }
 
 with DAG(
