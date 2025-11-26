@@ -274,7 +274,7 @@ def _extract_master_row(transaction: Dict) -> List:
     for col in MASTER_TX_COLUMNS:
         value = transaction.get(col)
         if col in {"isFraud", "isFlaggedFraud"} and value is not None:
-            value = int(bool(value))
+            value = bool(value)
         row.append(value)
     return row
 
