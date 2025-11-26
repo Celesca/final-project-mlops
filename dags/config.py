@@ -24,7 +24,8 @@ FRAUD_DB_CONFIG = {
 MODEL_SERVING_BASE_URL = os.getenv("MODEL_SERVING_BASE_URL", "http://host.docker.internal:8000")
 
 # DAG configuration
-DAG_START_DATE = "2025-11-23"  # The anchor date for simulation
+DAG_START_DATE = "2025-10-23"  # The anchor date for simulation
+MAX_SIMULATION_DAYS = 30  # Total number of days in the dataset (0-indexed: days 0-29)
 
 # Drift detection configuration
 DRIFT_THRESHOLD = 0.3  # 30% of columns can drift before alerting
