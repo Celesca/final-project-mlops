@@ -20,6 +20,7 @@ x-airflow-common: &airflow-common
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
     - ./data:/opt/airflow/data # <-- Maps your local data folder to container
+    - ./3_Model_Serving/models:/opt/airflow/models # <-- Maps models directory for accessing metadata
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -115,6 +116,7 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./3_Model_Serving/models:/opt/airflow/models # <-- Maps models directory for accessing metadata
 
   model-serving:
     build:

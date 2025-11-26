@@ -163,7 +163,11 @@ async def startup_event():
             baseline = _evaluate_against_master(model, artifacts, BASELINE_SAMPLE_SIZE)
             if baseline is not None:
                 best_metric = baseline
-                _save_model_meta({"val_auc": baseline, "run_id": "bootstrap"})
+                _save_model_meta({
+                    "val_auc": baseline, 
+                    "run_id": "bootstrap",
+                    "training_date": datetime.utcnow().strftime("%Y-%m-%d")
+                })
                 logger.info("Baseline AUC established at %.4f", baseline)
         except Exception:
             logger.exception("Failed to compute baseline metric")
@@ -333,6 +337,7 @@ def _maybe_promote_model(result: training.TrainingResult) -> bool:
             "run_id": result.run_id,
             "model_version": result.model_version,
             "updated_at": datetime.utcnow().isoformat(),
+            "training_date": datetime.utcnow().strftime("%Y-%m-%d"),  # Store training date for drift detection
         }
     )
     app.state.best_metric = candidate_metric
