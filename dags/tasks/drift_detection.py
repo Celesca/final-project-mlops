@@ -3,12 +3,11 @@ Data drift detection tasks for monitoring data quality.
 """
 import os
 import glob
-import json
 import pandas as pd
 from datetime import datetime as dt
-from pathlib import Path
 from dags.config import DATA_DIR, DRIFT_THRESHOLD
 from dags.utils.drift_detector import is_drift_critical
+from dags.utils.training_metadata import get_baseline_date, save_baseline_date, get_training_date
 
 
 def _get_latest_ingestion_date() -> str:
@@ -54,34 +53,12 @@ def _get_latest_ingestion_date() -> str:
     return max(dates)
 
 
-def _get_training_date() -> str:
-    """
-    Get the training date from the metadata file.
-    
-    Returns:
-        Date string in YYYY-MM-DD format, or None if not found
-    """
-    # Path to training metadata (in model serving models directory)
-    # Try to find it relative to the dags directory
-    repo_root = Path(__file__).resolve().parents[2]
-    metadata_path = repo_root / "3_Model_Serving" / "models" / "training_metadata.json"
-    
-    if not metadata_path.exists():
-        return None
-    
-    try:
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-        return metadata.get('last_training_date')
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"⚠️ Error reading training metadata: {e}")
-        return None
-
-
 def check_data_drift(ds, **kwargs):
     """
-    Checks for data drift by comparing the latest ingestion date's data with the training date's data.
-    This detects changes between the data used for training and the most recent ingested data.
+    Checks for data drift by comparing the latest ingestion date's data with the training date's data
+    (or baseline date if no training date exists).
+    This detects changes between the reference data and the most recent ingested data.
+    If no training date or baseline date exists, stores the current data as baseline for future comparisons.
     Logs warnings if drift exceeds the threshold.
     
     Args:
@@ -97,21 +74,8 @@ def check_data_drift(ds, **kwargs):
         return
     
     print(f"📅 Latest ingestion date found: {latest_ingestion_date}")
-    
-    # Get the training date from metadata
-    training_date = _get_training_date()
-    if not training_date:
-        print("⚠️ No training date found in metadata. Cannot perform drift detection.")
-        print("ℹ️ This might happen if no model has been trained yet.")
-        return
-    
-    print(f"📅 Training date: {training_date}")
-    
-    # If latest ingestion date is the same as training date, no drift to check
-    if latest_ingestion_date == training_date:
-        print(f"ℹ️ Latest ingestion date ({latest_ingestion_date}) matches training date. No drift to check.")
-        return
-    
+
+    # Load latest ingestion data first (needed for baseline storage if no reference exists)
     # Load latest ingestion data (current/reference for drift detection)
     latest_data_path = os.path.join(DATA_DIR, f"processed_fraud_data_{latest_ingestion_date}.parquet")
     if not os.path.exists(latest_data_path):
@@ -127,34 +91,58 @@ def check_data_drift(ds, **kwargs):
     if current_data.empty:
         print(f"⚠️ Latest ingestion data is empty for {latest_ingestion_date}, skipping drift detection.")
         return
+
+    # Get the training date or baseline date from metadata
+    training_date = get_training_date()
+    baseline_date = get_baseline_date() if not training_date else None
     
-    # Load training date data (reference/baseline for drift detection)
-    training_data_path = os.path.join(DATA_DIR, f"processed_fraud_data_{training_date}.parquet")
-    if not os.path.exists(training_data_path):
+    # If no training date and no baseline date, store current data as baseline
+    if not training_date and not baseline_date:
+        print("ℹ️ No training date or baseline date found. Storing current data as baseline for future drift detection.")
+        save_baseline_date(latest_ingestion_date)
+        baseline_date = latest_ingestion_date
+        print(f"✅ Baseline date set to: {baseline_date}")
+        print("ℹ️ Drift detection will be available starting from the next run.")
+        return
+    
+    # Use training date if available, otherwise use baseline date
+    reference_date = training_date if training_date else baseline_date
+    date_type = "training date" if training_date else "baseline date"
+    
+    print(f"📅 Reference {date_type}: {reference_date}")
+
+    # If latest ingestion date is the same as reference date, no drift to check
+    if latest_ingestion_date == reference_date:
+        print(f"ℹ️ Latest ingestion date ({latest_ingestion_date}) matches {date_type}. No drift to check.")
+        return
+
+    # Load reference date data (reference/baseline for drift detection)
+    reference_data_path = os.path.join(DATA_DIR, f"processed_fraud_data_{reference_date}.parquet")
+    if not os.path.exists(reference_data_path):
         # Fallback to CSV
-        training_data_path = os.path.join(DATA_DIR, f"processed_fraud_data_{training_date}.csv")
-        if not os.path.exists(training_data_path):
-            print(f"⚠️ Training date data file not found for {training_date}. Cannot perform drift detection.")
-            print("ℹ️ This might happen if the training date file was deleted or not ingested yet.")
+        reference_data_path = os.path.join(DATA_DIR, f"processed_fraud_data_{reference_date}.csv")
+        if not os.path.exists(reference_data_path):
+            print(f"⚠️ Reference {date_type} data file not found for {reference_date}. Cannot perform drift detection.")
+            print("ℹ️ This might happen if the reference date file was deleted or not ingested yet.")
             return
-        reference_data = pd.read_csv(training_data_path)
+        reference_data = pd.read_csv(reference_data_path)
     else:
-        reference_data = pd.read_parquet(training_data_path)
-    
+        reference_data = pd.read_parquet(reference_data_path)
+
     if reference_data.empty:
-        print(f"⚠️ Training date data is empty, skipping drift detection.")
+        print(f"⚠️ Reference {date_type} data is empty, skipping drift detection.")
         return
     
     # Ensure both datasets have the same columns (select only common columns)
     common_columns = list(set(reference_data.columns) & set(current_data.columns))
     if not common_columns:
-        print("⚠️ No common columns between training date and latest ingestion data.")
+        print(f"⚠️ No common columns between {date_type} and latest ingestion data.")
         return
-    
+
     reference_data = reference_data[common_columns]
     current_data = current_data[common_columns]
-    
-    print(f"📊 Comparing data: Training date ({training_date}, {len(reference_data)} rows) vs Latest ingestion ({latest_ingestion_date}, {len(current_data)} rows)")
+
+    print(f"📊 Comparing data: {date_type.capitalize()} ({reference_date}, {len(reference_data)} rows) vs Latest ingestion ({latest_ingestion_date}, {len(current_data)} rows)")
     print(f"📋 Columns being checked: {len(common_columns)} columns")
     
     # Check for drift
@@ -166,9 +154,9 @@ def check_data_drift(ds, **kwargs):
     
     if has_drift:
         print(f"🚨 ALERT: Data drift detected! Drift exceeds threshold of {DRIFT_THRESHOLD*100}%")
-        print(f"⚠️ Latest ingestion ({latest_ingestion_date}) shows significant drift compared to training date ({training_date})")
+        print(f"⚠️ Latest ingestion ({latest_ingestion_date}) shows significant drift compared to {date_type} ({reference_date})")
         print("💡 This could indicate:")
-        print("   - Data distribution has changed since model training")
+        print("   - Data distribution has changed since baseline/training")
         print("   - Model may need retraining")
         print("   - Potential data quality issues")
         print("   - Anomalous patterns requiring investigation")
@@ -177,7 +165,7 @@ def check_data_drift(ds, **kwargs):
         # - Trigger model retraining
         # - Log to monitoring system
     else:
-        print(f"✅ No significant drift detected. Data distribution is stable compared to training date.")
+        print(f"✅ No significant drift detected. Data distribution is stable compared to {date_type}.")
     
     return has_drift
 
