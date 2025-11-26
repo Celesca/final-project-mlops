@@ -160,6 +160,63 @@ def save_prediction(
             conn.close()
 
 
+def save_predictions_bulk(
+    predictions: List[Tuple[int, bool, float, datetime]]
+) -> List[int]:
+    """
+    Save multiple predictions in bulk for better performance.
+    
+    Args:
+        predictions: List of tuples (transaction_id, prediction, predict_proba, prediction_time)
+        
+    Returns:
+        List of saved prediction IDs
+    """
+    if not predictions:
+        return []
+    
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Use execute_values for efficient bulk insert
+        insert_query = '''
+            INSERT INTO predictions (
+                transaction_id, prediction, actual_label, predict_proba, prediction_time
+            )
+            VALUES %s
+            RETURNING id
+        '''
+        
+        # Prepare values: (transaction_id, prediction, NULL, predict_proba, prediction_time)
+        values = [(tx_id, pred, None, prob, pred_time) 
+                 for tx_id, pred, prob, pred_time in predictions]
+        
+        execute_values(
+            cursor,
+            insert_query,
+            values,
+            template=None,
+            page_size=1000
+        )
+        
+        ids = [row[0] for row in cursor.fetchall()]
+        conn.commit()
+        
+        logger.info(f"Saved {len(ids)} predictions in bulk")
+        return ids
+        
+    except Exception as e:
+        logger.error(f"Error saving predictions in bulk: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
 def save_transactions_bulk(transactions: List[Dict[str, Any]]) -> List[int]:
     """
     Save multiple transactions in bulk for better performance.
