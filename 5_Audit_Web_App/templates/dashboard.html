@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Fraud Detection Audit{% endblock %}
+
+{% block content %}
+<div class="py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="bi bi-speedometer2 me-2"></i>Dashboard</h2>
+        <button class="btn btn-outline-primary" onclick="location.reload()">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+    </div>
+
+    {% if metrics %}
+    <!-- Metrics Cards -->
+    <div class="row g-4 mb-4">
+        <div class="col-md-3">
+            <div class="card metric-card">
+                <div class="metric-value">{{ metrics.total_transactions }}</div>
+                <div class="metric-label">Total Predictions</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card metric-card">
+                <div class="metric-value text-success">{{ metrics.labeled_count or 0 }}</div>
+                <div class="metric-label">Labeled</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card metric-card">
+                <div class="metric-value text-warning">{{ metrics.unlabeled_count or metrics.total_transactions }}</div>
+                <div class="metric-label">Unlabeled</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card metric-card">
+                <div class="metric-value text-danger">{{ metrics.predicted_fraud_count or 0 }}</div>
+                <div class="metric-label">Predicted Frauds</div>
+            </div>
+        </div>
+    </div>
+
+    {% if metrics.accuracy is not none %}
+    <!-- Accuracy Metrics -->
+    <div class="row g-4 mb-4">
+        <div class="col-md-3">
+            <div class="card metric-card text-center">
+                <div class="metric-value" style="color: #4361ee;">{{ "%.1f"|format(metrics.accuracy * 100) }}%</div>
+                <div class="metric-label">Accuracy</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card metric-card text-center">
+                <div class="metric-value" style="color: #06d6a0;">{{ "%.1f"|format(metrics.precision * 100) }}%</div>
+                <div class="metric-label">Precision</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card metric-card text-center">
+                <div class="metric-value" style="color: #ffd166;">{{ "%.1f"|format(metrics.recall * 100) }}%</div>
+                <div class="metric-label">Recall</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card metric-card text-center">
+                <div class="metric-value" style="color: #ef476f;">{{ "%.1f"|format(metrics.f1_score * 100) }}%</div>
+                <div class="metric-label">F1 Score</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confusion Matrix -->
+    {% if metrics.confusion_matrix %}
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-grid-3x3 me-2"></i>Confusion Matrix</h5>
+                </div>
+                <div class="card-body">
+                    <canvas id="confusionMatrix" height="300"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-pie-chart me-2"></i>Prediction Distribution</h5>
+                </div>
+                <div class="card-body">
+                    <canvas id="predictionChart" height="300"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle me-2"></i>
+        <strong>No labeled predictions yet.</strong> Label some predictions in the 
+        <a href="{{ url_for('manual_labeling') }}">Manual Labeling</a> section to see accuracy metrics.
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle me-2"></i>
+        <strong>No data available.</strong> Make sure the backend is running and has predictions.
+    </div>
+    {% endif %}
+
+    <!-- Quick Links -->
+    <div class="row g-4">
+        <div class="col-md-4">
+            <div class="card h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-exclamation-triangle text-danger" style="font-size: 3rem;"></i>
+                    <h5 class="mt-3">Fraud Predictions</h5>
+                    <p class="text-muted">View all transactions predicted as fraud</p>
+                    <a href="{{ url_for('frauds_list') }}" class="btn btn-outline-danger">View Frauds</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-check-circle text-success" style="font-size: 3rem;"></i>
+                    <h5 class="mt-3">Non-Fraud Predictions</h5>
+                    <p class="text-muted">View all transactions predicted as legitimate</p>
+                    <a href="{{ url_for('non_frauds_list') }}" class="btn btn-outline-success">View Non-Frauds</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-pencil-square text-primary" style="font-size: 3rem;"></i>
+                    <h5 class="mt-3">Manual Labeling</h5>
+                    <p class="text-muted">Label predictions to improve accuracy tracking</p>
+                    <a href="{{ url_for('manual_labeling') }}" class="btn btn-outline-primary">Start Labeling</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{% if metrics and metrics.confusion_matrix %}
+<script>
+// Confusion Matrix Chart
+const cmCtx = document.getElementById('confusionMatrix').getContext('2d');
+const cmData = {{ metrics.confusion_matrix | tojson }};
+
+new Chart(cmCtx, {
+    type: 'bar',
+    data: {
+        labels: ['True Negative', 'False Positive', 'False Negative', 'True Positive'],
+        datasets: [{
+            data: [cmData[0][0], cmData[0][1], cmData[1][0], cmData[1][1]],
+            backgroundColor: ['#06d6a0', '#ffd166', '#ef476f', '#4361ee'],
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: {
+            legend: { display: false },
+            title: {
+                display: true,
+                text: 'Confusion Matrix Breakdown'
+            }
+        },
+        scales: {
+            y: {
+                beginAtZero: true,
+                title: { display: true, text: 'Count' }
+            }
+        }
+    }
+});
+
+// Prediction Distribution Chart
+const predCtx = document.getElementById('predictionChart').getContext('2d');
+new Chart(predCtx, {
+    type: 'doughnut',
+    data: {
+        labels: ['Predicted Fraud', 'Predicted Non-Fraud'],
+        datasets: [{
+            data: [{{ metrics.predicted_fraud_count }}, {{ metrics.total_transactions - metrics.predicted_fraud_count }}],
+            backgroundColor: ['#ef476f', '#06d6a0'],
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: {
+            legend: { position: 'bottom' }
+        }
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

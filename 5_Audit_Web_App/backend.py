@@ -1,355 +1,346 @@
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
-import pandas as pd
-import numpy as np
+"""
+Fraud Detection Audit Web Application Backend
+
+A Flask web application that serves as a frontend for the FastAPI model-serving backend.
+Fetches predictions from http://localhost:8000 and provides audit/labeling interface.
+"""
+
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, send_from_directory
+import requests
 import os
 from datetime import datetime
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import json
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='build/static', template_folder='build')
 app.secret_key = 'fraud_audit_secret_key_2025'
 
-# Global variables to store data
-transactions_df = None
-manual_labels = {}  # Store manual labels: {transaction_id: label}
-manual_status = {}  # Store manual status: {transaction_id: True/False}
+# Backend API configuration
+API_BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')
 
 # Add context processor for templates
 @app.context_processor
 def inject_current_date():
     return {'current_date': datetime.now().strftime('%b %d, %Y')}
 
-def load_sample_data():
-    """Load sample data from CSV or create mock data."""
-    global transactions_df
-    
+
+# ============================================================================
+# API Client Functions - Communicate with FastAPI Backend
+# ============================================================================
+
+def fetch_all_predictions(limit=None):
+    """Fetch all predictions from the FastAPI backend."""
     try:
-        # Try to load from the dataset directory
-        csv_path = os.path.join(os.path.dirname(__file__), '..', 'dataset', 'Synthetic_Financial_datasets_log.csv')
-        if os.path.exists(csv_path):
-            print(f"Loading data from {csv_path}")
-            df = pd.read_csv(csv_path)
-            # Take a sample for demo
-            df = df.sample(n=min(100, len(df))).reset_index(drop=True)
-        else:
-            print("CSV not found, creating mock data")
-            df = create_mock_data()
-        
-        # Add probability column if not exists
-        if 'probability' not in df.columns:
-            df['probability'] = np.random.rand(len(df))
-            # Make some high probability for fraud cases
-            fraud_mask = df['isFraud'] == 1
-            df.loc[fraud_mask, 'probability'] = np.random.uniform(0.6, 0.95, fraud_mask.sum())
-            # Make some low probability for non-fraud cases
-            non_fraud_mask = df['isFraud'] == 0
-            df.loc[non_fraud_mask, 'probability'] = np.random.uniform(0.05, 0.4, non_fraud_mask.sum())
-        
-        # Add ID column if not exists
-        if 'id' not in df.columns:
-            df.insert(0, 'id', range(1, len(df) + 1))
-        
-        transactions_df = df
-        print(f"Loaded {len(df)} transactions")
-        
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        transactions_df = create_mock_data()
+        url = f"{API_BASE_URL}/query/GET/predictions"
+        if limit:
+            url += f"?limit={limit}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching predictions: {e}")
+        return []
 
-def create_mock_data():
-    """Create mock transaction data for testing."""
-    np.random.seed(42)  # For reproducible results
-    
-    n_samples = 80
-    
-    data = {
-        'id': range(1, n_samples + 1),
-        'step': np.random.randint(1, 100, n_samples),
-        'type': np.random.choice(['CASH_OUT', 'PAYMENT', 'TRANSFER', 'CASH_IN', 'DEBIT'], n_samples),
-        'amount': np.random.lognormal(8, 1.5, n_samples),
-        'nameOrig': [f'C{np.random.randint(1000000, 9999999)}' for _ in range(n_samples)],
-        'oldbalanceOrg': np.random.lognormal(9, 1.2, n_samples),
-        'newbalanceOrig': np.random.lognormal(8.5, 1.3, n_samples),
-        'nameDest': [f'{"M" if np.random.random() < 0.3 else "C"}{np.random.randint(1000000, 9999999)}' for _ in range(n_samples)],
-        'oldbalanceDest': np.random.lognormal(8, 1.5, n_samples),
-        'newbalanceDest': np.random.lognormal(8.2, 1.4, n_samples),
-        'isFraud': np.random.choice([0, 1], n_samples, p=[0.85, 0.15]),  # 15% fraud
-        'isFlaggedFraud': np.random.choice([0, 1], n_samples, p=[0.9, 0.1])
-    }
-    
-    df = pd.DataFrame(data)
-    
-    # Add probability column based on fraud status with some noise
-    df['probability'] = np.where(
-        df['isFraud'] == 1,
-        np.random.uniform(0.4, 0.95, n_samples),  # Higher prob for fraud
-        np.random.uniform(0.02, 0.6, n_samples)   # Lower prob for non-fraud
-    )
-    
-    # Create some false positives and negatives
-    false_positive_mask = (df['isFraud'] == 0) & (np.random.random(n_samples) < 0.1)
-    df.loc[false_positive_mask, 'probability'] = np.random.uniform(0.6, 0.9, false_positive_mask.sum())
-    
-    false_negative_mask = (df['isFraud'] == 1) & (np.random.random(n_samples) < 0.15)
-    df.loc[false_negative_mask, 'probability'] = np.random.uniform(0.1, 0.4, false_negative_mask.sum())
-    
-    return df
 
-def get_current_metrics():
-    """Calculate current metrics including manual labels."""
-    if transactions_df is None:
+def fetch_frauds(limit=None):
+    """Fetch fraud predictions from the FastAPI backend."""
+    try:
+        url = f"{API_BASE_URL}/query/GET/frauds"
+        if limit:
+            url += f"?limit={limit}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching frauds: {e}")
+        return []
+
+
+def fetch_non_frauds(limit=None):
+    """Fetch non-fraud predictions from the FastAPI backend."""
+    try:
+        url = f"{API_BASE_URL}/query/GET/non_frauds"
+        if limit:
+            url += f"?limit={limit}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching non-frauds: {e}")
+        return []
+
+
+def fetch_stats():
+    """Fetch prediction statistics from the FastAPI backend."""
+    try:
+        url = f"{API_BASE_URL}/query/GET/stats"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching stats: {e}")
+        return {}
+
+
+def update_prediction_label(prediction_id, actual_label):
+    """Update a prediction's actual_label via the FastAPI backend."""
+    try:
+        url = f"{API_BASE_URL}/query/PUT/predictions"
+        payload = {
+            "transaction_id": prediction_id,  # API uses transaction_id field
+            "actual_label": actual_label
+        }
+        response = requests.put(url, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error updating prediction label: {e}")
+        return None
+
+
+# ============================================================================
+# Metrics Calculation
+# ============================================================================
+
+def calculate_metrics_from_predictions(predictions):
+    """Calculate accuracy metrics from predictions list."""
+    if not predictions:
         return None
     
-    df = transactions_df.copy()
+    # Filter predictions that have both prediction and actual_label
+    labeled = [p for p in predictions if p.get('actual_label') is not None]
     
-    # Use manual labels where available, otherwise use original labels
-    actual_labels = []
-    predicted_labels = []
+    if not labeled:
+        # Return basic stats without accuracy metrics
+        total = len(predictions)
+        fraud_predictions = sum(1 for p in predictions if p.get('prediction') == True)
+        return {
+            'total_transactions': total,
+            'predicted_fraud_count': fraud_predictions,
+            'predicted_non_fraud_count': total - fraud_predictions,
+            'labeled_count': 0,
+            'unlabeled_count': total,
+            'accuracy': None,
+            'precision': None,
+            'recall': None,
+            'f1_score': None,
+            'confusion_matrix': None,
+        }
     
-    for idx, row in df.iterrows():
-        transaction_id = row['id']
-        
-        # Use manual label if available, otherwise use original
-        if transaction_id in manual_labels:
-            actual_label = manual_labels[transaction_id]
-        else:
-            actual_label = row['isFraud']
-        
-        # Model prediction based on probability threshold
-        predicted_label = 1 if row['probability'] >= 0.5 else 0
-        
-        actual_labels.append(actual_label)
-        predicted_labels.append(predicted_label)
+    y_true = [1 if p.get('actual_label') else 0 for p in labeled]
+    y_pred = [1 if p.get('prediction') else 0 for p in labeled]
     
-    # Calculate metrics
+    total = len(predictions)
+    
     metrics = {
-        'total_transactions': len(df),
-        'accuracy': accuracy_score(actual_labels, predicted_labels),
-        'precision': precision_score(actual_labels, predicted_labels, zero_division=0),
-        'recall': recall_score(actual_labels, predicted_labels, zero_division=0),
-        'f1_score': f1_score(actual_labels, predicted_labels, zero_division=0),
-        'confusion_matrix': confusion_matrix(actual_labels, predicted_labels).tolist(),
-        'true_fraud_count': sum(actual_labels),
-        'predicted_fraud_count': sum(predicted_labels),
-        'manual_reviewed_count': len(manual_labels),
-        'pending_review_count': len(df) - len(manual_labels)
+        'total_transactions': total,
+        'labeled_count': len(labeled),
+        'unlabeled_count': total - len(labeled),
+        'accuracy': accuracy_score(y_true, y_pred),
+        'precision': precision_score(y_true, y_pred, zero_division=0),
+        'recall': recall_score(y_true, y_pred, zero_division=0),
+        'f1_score': f1_score(y_true, y_pred, zero_division=0),
+        'confusion_matrix': confusion_matrix(y_true, y_pred).tolist(),
+        'true_fraud_count': sum(y_true),
+        'predicted_fraud_count': sum(y_pred),
     }
     
     return metrics
 
-def get_false_cases():
-    """Get false positive and false negative cases."""
-    if transactions_df is None:
-        return [], []
-    
-    df = transactions_df.copy()
-    
+
+def get_false_cases_from_predictions(predictions):
+    """Extract false positive and false negative cases from predictions."""
     false_positives = []
     false_negatives = []
     
-    for idx, row in df.iterrows():
-        transaction_id = row['id']
+    for p in predictions:
+        actual = p.get('actual_label')
+        predicted = p.get('prediction')
         
-        # Use manual label if available
-        if transaction_id in manual_labels:
-            actual_label = manual_labels[transaction_id]
-        else:
-            actual_label = row['isFraud']
+        # Skip unlabeled predictions
+        if actual is None:
+            continue
         
-        predicted_label = 1 if row['probability'] >= 0.5 else 0
+        # False Positive: predicted fraud but actually not fraud
+        if predicted == True and actual == False:
+            false_positives.append(p)
         
-        # Check for false positives
-        if actual_label == 0 and predicted_label == 1:
-            row_dict = row.to_dict()
-            row_dict['manual_status'] = transaction_id in manual_status
-            row_dict['manual_label'] = manual_labels.get(transaction_id)
-            false_positives.append(row_dict)
-        
-        # Check for false negatives
-        elif actual_label == 1 and predicted_label == 0:
-            row_dict = row.to_dict()
-            row_dict['manual_status'] = transaction_id in manual_status
-            row_dict['manual_label'] = manual_labels.get(transaction_id)
-            false_negatives.append(row_dict)
+        # False Negative: predicted non-fraud but actually fraud
+        elif predicted == False and actual == True:
+            false_negatives.append(p)
     
     # Sort by probability
-    false_positives.sort(key=lambda x: x['probability'], reverse=True)
-    false_negatives.sort(key=lambda x: x['probability'])
+    false_positives.sort(key=lambda x: x.get('predict_proba', 0), reverse=True)
+    false_negatives.sort(key=lambda x: x.get('predict_proba', 0))
     
-    return false_positives[:50], false_negatives[:50]
+    return false_positives, false_negatives
 
-def get_unlabeled_transactions(limit=20):
-    """Get transactions that haven't been manually labeled."""
-    if transactions_df is None:
-        return []
-    
-    df = transactions_df.copy()
-    unlabeled = []
-    
-    for idx, row in df.iterrows():
-        transaction_id = row['id']
-        if transaction_id not in manual_status:
-            row_dict = row.to_dict()
-            row_dict['manual_status'] = False
-            row_dict['manual_label'] = None
-            unlabeled.append(row_dict)
-    
-    # Sort by probability (highest first for more interesting cases)
-    unlabeled.sort(key=lambda x: x['probability'], reverse=True)
-    
+
+def get_unlabeled_predictions(predictions, limit=20):
+    """Get predictions that haven't been labeled yet."""
+    unlabeled = [p for p in predictions if p.get('actual_label') is None]
+    # Sort by probability (highest first - more interesting cases)
+    unlabeled.sort(key=lambda x: x.get('predict_proba', 0), reverse=True)
     return unlabeled[:limit]
 
+
+# ============================================================================
+# Static File Routes (React Build)
+# ============================================================================
+
 @app.route('/')
-def index():
-    """Main dashboard page."""
-    return redirect(url_for('dashboard'))
+def serve_react():
+    """Serve React app."""
+    return send_from_directory(app.template_folder, 'index.html')
 
-@app.route('/dashboard')
-def dashboard():
-    """Dashboard with accuracy metrics."""
-    metrics = get_current_metrics()
-    false_positives, false_negatives = get_false_cases()
-    
-    return render_template('dashboard.html', 
-                         metrics=metrics, 
-                         false_positives=false_positives[:10],
-                         false_negatives=false_negatives[:10])
 
-@app.route('/false_cases')
-def false_cases():
-    """Page showing all false positive and false negative cases."""
-    false_positives, false_negatives = get_false_cases()
-    
-    return render_template('false_cases.html',
-                         false_positives=false_positives,
-                         false_negatives=false_negatives)
+@app.route('/<path:path>')
+def serve_static(path):
+    """Serve static files."""
+    if os.path.exists(os.path.join(app.template_folder, path)):
+        return send_from_directory(app.template_folder, path)
+    return send_from_directory(app.template_folder, 'index.html')
 
-@app.route('/manual_labeling')
-def manual_labeling():
-    """Manual labeling interface."""
-    transactions = get_unlabeled_transactions(20)
-    return render_template('manual_labeling.html', transactions=transactions)
 
-@app.route('/api_test')
-def api_test():
-    """API testing interface."""
-    return render_template('api_test.html')
+# ============================================================================
+# API Routes - For React Frontend
+# ============================================================================
 
-@app.route('/label_transaction', methods=['POST'])
-def label_transaction():
-    """API endpoint to save manual labels."""
-    try:
-        transaction_id = int(request.form.get('transaction_id'))
-        manual_label = int(request.form.get('manual_label'))  # 0 or 1
-        
-        if manual_label not in [0, 1]:
-            flash('Invalid label provided', 'error')
-            return redirect(url_for('manual_labeling'))
-        
-        # Store the manual label
-        manual_labels[transaction_id] = manual_label
-        manual_status[transaction_id] = True
-        
-        # Save to file for persistence
-        save_manual_labels()
-        
-        flash('Transaction labeled successfully!', 'success')
-        
-    except Exception as e:
-        print(f"Error in label_transaction: {e}")
-        flash('Error processing request', 'error')
-    
-    return redirect(url_for('manual_labeling'))
+@app.route('/api/predictions')
+def api_get_predictions():
+    """Get all predictions."""
+    limit = request.args.get('limit', type=int)
+    predictions = fetch_all_predictions(limit=limit)
+    return jsonify(predictions)
+
+
+@app.route('/api/frauds')
+def api_get_frauds():
+    """Get fraud predictions (prediction=True)."""
+    limit = request.args.get('limit', type=int)
+    frauds = fetch_frauds(limit=limit)
+    return jsonify(frauds)
+
+
+@app.route('/api/non_frauds')
+def api_get_non_frauds():
+    """Get non-fraud predictions (prediction=False)."""
+    limit = request.args.get('limit', type=int)
+    non_frauds = fetch_non_frauds(limit=limit)
+    return jsonify(non_frauds)
+
+
+@app.route('/api/stats')
+def api_get_stats():
+    """Get prediction statistics."""
+    stats = fetch_stats()
+    return jsonify(stats)
+
 
 @app.route('/api/metrics')
 def api_metrics():
-    """API endpoint to get current metrics."""
-    metrics = get_current_metrics()
+    """Get calculated metrics from all predictions."""
+    predictions = fetch_all_predictions()
+    metrics = calculate_metrics_from_predictions(predictions)
     if metrics:
         return jsonify(metrics)
-    else:
-        return jsonify({'error': 'No data available'}), 404
+    return jsonify({'error': 'No data available'}), 404
+
+
+@app.route('/api/false_cases')
+def api_false_cases():
+    """Get false positive and false negative cases."""
+    predictions = fetch_all_predictions()
+    false_positives, false_negatives = get_false_cases_from_predictions(predictions)
+    return jsonify({
+        'false_positives': false_positives[:50],
+        'false_negatives': false_negatives[:50]
+    })
+
+
+@app.route('/api/unlabeled')
+def api_unlabeled():
+    """Get unlabeled predictions for manual review."""
+    limit = request.args.get('limit', default=20, type=int)
+    predictions = fetch_all_predictions()
+    unlabeled = get_unlabeled_predictions(predictions, limit=limit)
+    return jsonify(unlabeled)
+
+
+@app.route('/api/label', methods=['POST'])
+def api_label_prediction():
+    """Label a prediction with actual_label."""
+    try:
+        data = request.get_json()
+        prediction_id = data.get('prediction_id') or data.get('id')
+        actual_label = data.get('actual_label')
+        
+        if prediction_id is None:
+            return jsonify({'error': 'prediction_id is required'}), 400
+        
+        if actual_label is None or actual_label not in [True, False, 0, 1]:
+            return jsonify({'error': 'actual_label must be true/false or 0/1'}), 400
+        
+        # Convert to boolean
+        actual_label_bool = bool(actual_label) if isinstance(actual_label, int) else actual_label
+        
+        result = update_prediction_label(prediction_id, actual_label_bool)
+        
+        if result:
+            return jsonify({'success': True, 'result': result})
+        else:
+            return jsonify({'error': 'Failed to update label'}), 500
+            
+    except Exception as e:
+        print(f"Error labeling prediction: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/transaction/<int:transaction_id>')
 def api_transaction_details(transaction_id):
-    """API endpoint to get transaction details."""
-    if transactions_df is None:
-        return jsonify({'error': 'No data loaded'}), 500
+    """Get details for a specific transaction/prediction."""
+    predictions = fetch_all_predictions()
     
-    try:
-        transaction_row = transactions_df[transactions_df['id'] == transaction_id]
-        
-        if len(transaction_row) == 0:
-            return jsonify({'error': 'Transaction not found'}), 404
-        
-        transaction = transaction_row.iloc[0].to_dict()
-        transaction['manual_status'] = transaction_id in manual_status
-        transaction['manual_label'] = manual_labels.get(transaction_id)
-        
-        # Convert numpy types to Python types for JSON serialization
-        for key, value in transaction.items():
-            if isinstance(value, (np.integer, np.floating)):
-                transaction[key] = float(value)
-            elif isinstance(value, np.bool_):
-                transaction[key] = bool(value)
-        
-        return jsonify(transaction)
-        
-    except Exception as e:
-        print(f"Error getting transaction details: {e}")
-        return jsonify({'error': 'Database error'}), 500
+    for p in predictions:
+        if p.get('id') == transaction_id or p.get('transaction_id') == transaction_id:
+            return jsonify(p)
+    
+    return jsonify({'error': 'Transaction not found'}), 404
+
 
 @app.route('/api/data/query')
 def api_query_data():
     """Query data endpoint - returns paginated transaction data."""
     try:
-        page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 20))
-        filter_type = request.args.get('type', 'all')  # all, fraud, legitimate, pending
+        page = request.args.get('page', default=1, type=int)
+        per_page = request.args.get('per_page', default=20, type=int)
+        filter_type = request.args.get('type', 'all')  # all, fraud, non_fraud, unlabeled
         
-        if transactions_df is None:
-            return jsonify({'error': 'No data loaded'}), 500
-        
-        df = transactions_df.copy()
-        
-        # Apply filters
+        # Fetch data based on filter
         if filter_type == 'fraud':
-            df = df[df['isFraud'] == 1]
-        elif filter_type == 'legitimate':
-            df = df[df['isFraud'] == 0]
-        elif filter_type == 'pending':
-            pending_ids = [tid for tid in df['id'] if tid not in manual_status]
-            df = df[df['id'].isin(pending_ids)]
+            predictions = fetch_frauds()
+        elif filter_type == 'non_fraud':
+            predictions = fetch_non_frauds()
+        else:
+            predictions = fetch_all_predictions()
+        
+        # Additional filtering for unlabeled
+        if filter_type == 'unlabeled':
+            predictions = [p for p in predictions if p.get('actual_label') is None]
         
         # Pagination
+        total = len(predictions)
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
-        page_data = df.iloc[start_idx:end_idx]
-        
-        # Convert to list of dicts and add manual info
-        transactions = []
-        for idx, row in page_data.iterrows():
-            transaction = row.to_dict()
-            transaction_id = transaction['id']
-            transaction['manual_status'] = transaction_id in manual_status
-            transaction['manual_label'] = manual_labels.get(transaction_id)
-            
-            # Convert numpy types
-            for key, value in transaction.items():
-                if isinstance(value, (np.integer, np.floating)):
-                    transaction[key] = float(value)
-                elif isinstance(value, np.bool_):
-                    transaction[key] = bool(value)
-            
-            transactions.append(transaction)
+        page_data = predictions[start_idx:end_idx]
         
         return jsonify({
-            'transactions': transactions,
+            'transactions': page_data,
             'pagination': {
                 'page': page,
                 'per_page': per_page,
-                'total': len(df),
-                'pages': (len(df) + per_page - 1) // per_page
+                'total': total,
+                'pages': (total + per_page - 1) // per_page if total > 0 else 0
             }
         })
         
@@ -357,90 +348,91 @@ def api_query_data():
         print(f"Error querying data: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/data/edit/<int:transaction_id>', methods=['PUT'])
-def api_edit_transaction(transaction_id):
-    """Edit transaction manual label."""
+
+@app.route('/api/data/edit/<int:prediction_id>', methods=['PUT'])
+def api_edit_prediction(prediction_id):
+    """Edit prediction's actual_label."""
     try:
         data = request.get_json()
-        manual_label = data.get('manual_label')
+        actual_label = data.get('actual_label')
         
-        if manual_label not in [0, 1, None]:
-            return jsonify({'error': 'Invalid manual_label'}), 400
+        if actual_label is not None and actual_label not in [True, False, 0, 1]:
+            return jsonify({'error': 'Invalid actual_label value'}), 400
         
-        if manual_label is not None:
-            manual_labels[transaction_id] = manual_label
-            manual_status[transaction_id] = True
-        else:
-            # Remove manual label
-            manual_labels.pop(transaction_id, None)
-            manual_status.pop(transaction_id, None)
+        if actual_label is not None:
+            actual_label_bool = bool(actual_label) if isinstance(actual_label, int) else actual_label
+            result = update_prediction_label(prediction_id, actual_label_bool)
+            
+            if result:
+                return jsonify({'success': True, 'message': 'Prediction updated', 'result': result})
+            else:
+                return jsonify({'error': 'Failed to update'}), 500
         
-        save_manual_labels()
-        
-        return jsonify({'success': True, 'message': 'Transaction updated'})
+        return jsonify({'success': True, 'message': 'No changes made'})
         
     except Exception as e:
-        print(f"Error editing transaction: {e}")
+        print(f"Error editing prediction: {e}")
         return jsonify({'error': str(e)}), 500
 
-def save_manual_labels():
-    """Save manual labels to file for persistence."""
-    try:
-        data = {
-            'manual_labels': manual_labels,
-            'manual_status': manual_status,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        with open('manual_labels.json', 'w') as f:
-            json.dump(data, f, indent=2)
-            
-    except Exception as e:
-        print(f"Error saving manual labels: {e}")
 
-def load_manual_labels():
-    """Load manual labels from file."""
-    global manual_labels, manual_status
-    
+# ============================================================================
+# Health Check
+# ============================================================================
+
+@app.route('/api/health')
+def api_health():
+    """Health check endpoint."""
+    backend_status = "unknown"
     try:
-        if os.path.exists('manual_labels.json'):
-            with open('manual_labels.json', 'r') as f:
-                data = json.load(f)
-                manual_labels = {int(k): v for k, v in data.get('manual_labels', {}).items()}
-                manual_status = {int(k): v for k, v in data.get('manual_status', {}).items()}
-                print(f"Loaded {len(manual_labels)} manual labels")
-    except Exception as e:
-        print(f"Error loading manual labels: {e}")
+        response = requests.get(f"{API_BASE_URL}/", timeout=5)
+        backend_status = "healthy" if response.status_code == 200 else "unhealthy"
+    except:
+        backend_status = "unreachable"
+    
+    return jsonify({
+        'status': 'running',
+        'backend_url': API_BASE_URL,
+        'backend_status': backend_status,
+        'timestamp': datetime.now().isoformat()
+    })
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
 
 if __name__ == '__main__':
-    print("🔍 Starting Fraud Detection Audit Backend (CSV Mode)")
+    print("🔍 Starting Fraud Detection Audit Backend")
     print("=" * 60)
-    
-    # Load data and manual labels
-    load_sample_data()
-    load_manual_labels()
-    
-    # Print summary
-    if transactions_df is not None:
-        total_transactions = len(transactions_df)
-        fraud_count = sum(transactions_df['isFraud'])
-        manual_count = len(manual_labels)
-        
-        print(f"📊 Data Summary:")
-        print(f"   Total Transactions: {total_transactions}")
-        print(f"   Fraud Cases: {fraud_count} ({fraud_count/total_transactions*100:.1f}%)")
-        print(f"   Manual Labels: {manual_count}")
-        print(f"   Pending Review: {total_transactions - manual_count}")
-    
+    print(f"📡 Backend API URL: {API_BASE_URL}")
     print(f"\n🚀 Server starting at: http://localhost:5000")
-    print("📝 Available endpoints:")
-    print("   GET  /dashboard           - Main dashboard")
-    print("   GET  /false_cases         - False cases analysis") 
-    print("   GET  /manual_labeling     - Manual labeling interface")
-    print("   POST /label_transaction   - Submit manual label")
-    print("   GET  /api/metrics         - Current metrics JSON")
-    print("   GET  /api/data/query      - Query transaction data")
-    print("   PUT  /api/data/edit/<id>  - Edit transaction label")
+    print("\n📝 Available API endpoints:")
+    print("   GET  /api/predictions      - All predictions")
+    print("   GET  /api/frauds           - Fraud predictions only")
+    print("   GET  /api/non_frauds       - Non-fraud predictions only")
+    print("   GET  /api/stats            - Prediction statistics")
+    print("   GET  /api/metrics          - Calculated accuracy metrics")
+    print("   GET  /api/false_cases      - False positives/negatives")
+    print("   GET  /api/unlabeled        - Unlabeled predictions")
+    print("   POST /api/label            - Label a prediction")
+    print("   GET  /api/transaction/<id> - Transaction details")
+    print("   GET  /api/data/query       - Query with pagination")
+    print("   PUT  /api/data/edit/<id>   - Edit prediction label")
+    print("   GET  /api/health           - Health check")
+    print("-" * 60)
+    
+    # Test backend connection
+    try:
+        response = requests.get(f"{API_BASE_URL}/", timeout=5)
+        if response.status_code == 200:
+            print(f"✅ Connected to FastAPI backend at {API_BASE_URL}")
+        else:
+            print(f"⚠️  Backend returned status {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️  Warning: Cannot connect to backend at {API_BASE_URL}")
+        print(f"   Error: {e}")
+        print("   Make sure the model-serving container is running!")
+    
     print("-" * 60)
     
     # Run the application

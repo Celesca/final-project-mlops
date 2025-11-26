@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block title %}Manual Labeling - Fraud Detection Audit{% endblock %}
+
+{% block content %}
+<div class="py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2><i class="bi bi-pencil-square me-2"></i>Manual Fraud Labeling</h2>
+            <p class="text-muted mb-0">Review and label <strong>fraud predictions</strong> to track model accuracy</p>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-danger fs-6">{{ transactions|length }} pending fraud cases</span>
+            <a href="{{ url_for('frauds_list') }}" class="btn btn-outline-secondary">
+                <i class="bi bi-list"></i> View All Frauds
+            </a>
+            <button class="btn btn-outline-primary" onclick="location.reload()">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+        </div>
+    </div>
+
+    <div class="alert alert-info mb-4">
+        <i class="bi bi-info-circle me-2"></i>
+        <strong>Keyboard Shortcuts:</strong> Press <kbd>F</kbd> to mark first card as Fraud, <kbd>L</kbd> to mark as Legitimate
+    </div>
+
+    {% if transactions %}
+    <div class="row g-4">
+        {% for t in transactions %}
+        <div class="col-md-6 col-lg-4">
+            <div class="card h-100 border-danger">
+                <div class="card-header d-flex justify-content-between align-items-center bg-danger bg-opacity-10">
+                    <span>
+                        <strong class="text-danger">#{{ t.original_index }}</strong>
+                        <code class="ms-1">ID: {{ t.id or t.transaction_id }}</code>
+                        <span class="badge bg-info ms-2">{{ t.type }}</span>
+                    </span>
+                    <span class="badge badge-fraud">Predicted FRAUD</span>
+                </div>
+                <div class="card-body">
+                    <!-- Amount -->
+                    <div class="mb-3">
+                        <h3 class="amount-cell mb-0">${{ "%.2f"|format(t.amount) }}</h3>
+                        <small class="text-muted">Transaction Amount</small>
+                    </div>
+                    
+                    <!-- Probability Bar -->
+                    <div class="mb-3">
+                        <label class="small text-muted">Fraud Probability</label>
+                        <div class="d-flex align-items-center">
+                            <div class="progress flex-grow-1" style="height: 12px;">
+                                <div class="progress-bar {% if t.predict_proba >= 0.7 %}bg-danger{% elif t.predict_proba >= 0.5 %}bg-warning{% else %}bg-success{% endif %}" 
+                                     style="width: {{ (t.predict_proba * 100)|int }}%"></div>
+                            </div>
+                            <span class="ms-2 fw-bold">{{ "%.1f"|format(t.predict_proba * 100) }}%</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Account Details -->
+                    <div class="row g-2 mb-3">
+                        <div class="col-6">
+                            <div class="p-2 bg-light rounded">
+                                <small class="text-muted d-block">Origin</small>
+                                <small class="fw-bold">{{ t.nameOrig }}</small><br>
+                                <small class="text-muted">
+                                    ${{ "%.0f"|format(t.oldbalanceOrg) }} → ${{ "%.0f"|format(t.newbalanceOrig) }}
+                                </small>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="p-2 bg-light rounded">
+                                <small class="text-muted d-block">Destination</small>
+                                <small class="fw-bold">{{ t.nameDest }}</small><br>
+                                <small class="text-muted">
+                                    ${{ "%.0f"|format(t.oldbalanceDest) }} → ${{ "%.0f"|format(t.newbalanceDest) }}
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Risk Indicators -->
+                    <div class="mb-3">
+                        <small class="text-muted">Risk Indicators:</small>
+                        <div class="mt-1">
+                            {% if t.newbalanceOrig == 0 and t.oldbalanceOrg > 0 %}
+                            <span class="badge bg-danger me-1">Account Emptied</span>
+                            {% endif %}
+                            {% if t.amount > 100000 %}
+                            <span class="badge bg-warning text-dark me-1">Large Amount</span>
+                            {% endif %}
+                            {% if t.type in ['TRANSFER', 'CASH_OUT'] %}
+                            <span class="badge bg-info me-1">{{ t.type }}</span>
+                            {% endif %}
+                            {% if t.isFlaggedFraud %}
+                            <span class="badge bg-danger me-1">Flagged</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <div class="d-flex gap-2">
+                        <form action="{{ url_for('label_transaction') }}" method="POST" class="flex-grow-1">
+                            <input type="hidden" name="prediction_id" value="{{ t.id or t.transaction_id }}">
+                            <input type="hidden" name="manual_label" value="1">
+                            <button type="submit" class="btn btn-label-fraud w-100">
+                                <i class="bi bi-x-circle me-1"></i>Confirm Fraud
+                            </button>
+                        </form>
+                        <form action="{{ url_for('label_transaction') }}" method="POST" class="flex-grow-1">
+                            <input type="hidden" name="prediction_id" value="{{ t.id or t.transaction_id }}">
+                            <input type="hidden" name="manual_label" value="0">
+                            <button type="submit" class="btn btn-label-legit w-100">
+                                <i class="bi bi-check-circle me-1"></i>Mark as Legit
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="alert alert-success">
+        <i class="bi bi-check-circle me-2"></i>
+        <strong>All fraud predictions have been labeled!</strong> Great job reviewing all fraud cases.
+        <a href="{{ url_for('frauds_list') }}" class="alert-link ms-2">View all fraud predictions →</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Keyboard shortcuts for faster labeling
+document.addEventListener('keydown', function(e) {
+    const cards = document.querySelectorAll('.card');
+    if (cards.length === 0) return;
+    
+    // Focus first card if none focused
+    const firstCard = cards[0];
+    
+    if (e.key === 'f' || e.key === 'F') {
+        // Mark first visible as Fraud
+        const fraudBtn = firstCard.querySelector('button[value="1"]') || 
+                         firstCard.querySelector('.btn-label-fraud');
+        if (fraudBtn) fraudBtn.click();
+    } else if (e.key === 'l' || e.key === 'L') {
+        // Mark first visible as Legitimate
+        const legitBtn = firstCard.querySelector('button[value="0"]') ||
+                         firstCard.querySelector('.btn-label-legit');
+        if (legitBtn) legitBtn.click();
+    }
+});
+</script>
+{% endblock %}

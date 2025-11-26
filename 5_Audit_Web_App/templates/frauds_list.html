@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - Fraud Detection Audit{% endblock %}
+
+{% block content %}
+<div class="py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>
+            <i class="bi bi-exclamation-triangle text-danger me-2"></i>
+            {{ title }}
+        </h2>
+        <div class="d-flex align-items-center gap-3">
+            <!-- Filter Dropdown -->
+            <div class="d-flex align-items-center gap-2">
+                <label class="text-muted mb-0">Filter:</label>
+                <select class="form-select form-select-sm" style="width: auto;" 
+                        onchange="window.location.href='{{ url_for('frauds_list') }}?filter=' + this.value">
+                    <option value="all" {% if current_filter == 'all' %}selected{% endif %}>All</option>
+                    <option value="pending" {% if current_filter == 'pending' %}selected{% endif %}>Pending</option>
+                    <option value="labeled" {% if current_filter == 'labeled' %}selected{% endif %}>Labeled</option>
+                </select>
+            </div>
+            
+            <span class="badge bg-danger fs-6">{{ predictions|length }} predictions</span>
+            
+            <a href="{{ url_for('manual_labeling') }}" class="btn btn-primary">
+                <i class="bi bi-pencil-square me-1"></i>Go to Manual Labeling
+            </a>
+            
+            <button class="btn btn-outline-primary" onclick="location.reload()">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+        </div>
+    </div>
+
+    {% if predictions %}
+    <div class="alert alert-info d-flex align-items-center mb-4">
+        <i class="bi bi-info-circle me-2"></i>
+        <div>
+            <strong>Tip:</strong> Use the <a href="{{ url_for('manual_labeling') }}" class="alert-link">Manual Labeling</a> 
+            page for a better fraud review experience with detailed transaction cards.
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead class="table-light">
+                        <tr>
+                            <th>#</th>
+                            <th>ID</th>
+                            <th>Type</th>
+                            <th>Amount</th>
+                            <th>Origin Account</th>
+                            <th>Destination Account</th>
+                            <th>Probability</th>
+                            <th>Prediction</th>
+                            <th>Actual Label</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in predictions %}
+                        <tr>
+                            <td><strong>{{ p.display_index }}</strong></td>
+                            <td><code>{{ p.id or p.transaction_id }}</code></td>
+                            <td>
+                                <span class="badge bg-info">{{ p.type }}</span>
+                            </td>
+                            <td class="amount-cell">${{ "%.2f"|format(p.amount) }}</td>
+                            <td>
+                                <small>{{ p.nameOrig }}</small><br>
+                                <span class="text-muted" style="font-size: 0.75rem;">
+                                    {{ "%.2f"|format(p.oldbalanceOrg) }} → {{ "%.2f"|format(p.newbalanceOrig) }}
+                                </span>
+                            </td>
+                            <td>
+                                <small>{{ p.nameDest }}</small><br>
+                                <span class="text-muted" style="font-size: 0.75rem;">
+                                    {{ "%.2f"|format(p.oldbalanceDest) }} → {{ "%.2f"|format(p.newbalanceDest) }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div class="progress flex-grow-1" style="height: 8px;">
+                                        <div class="progress-bar bg-danger" 
+                                             style="width: {{ (p.predict_proba * 100)|int }}%"></div>
+                                    </div>
+                                    <span class="ms-2 small">{{ "%.2f"|format(p.predict_proba) }}</span>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="badge badge-fraud">FRAUD</span>
+                            </td>
+                            <td>
+                                {% if p.actual_label is not none %}
+                                    {% if p.actual_label %}
+                                    <span class="badge bg-danger">Fraud</span>
+                                    {% else %}
+                                    <span class="badge bg-success">Legit</span>
+                                    {% endif %}
+                                {% else %}
+                                <span class="badge badge-pending">Pending</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if p.actual_label is none %}
+                                <a href="{{ url_for('manual_labeling') }}" class="btn btn-sm btn-outline-primary" title="Label this transaction">
+                                    <i class="bi bi-pencil"></i> Label
+                                </a>
+                                {% else %}
+                                <span class="text-muted">Labeled</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle me-2"></i>
+        {% if current_filter == 'pending' %}
+        No pending fraud predictions to label. All fraud cases have been reviewed!
+        {% elif current_filter == 'labeled' %}
+        No labeled fraud predictions found.
+        {% else %}
+        No fraud predictions found.
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

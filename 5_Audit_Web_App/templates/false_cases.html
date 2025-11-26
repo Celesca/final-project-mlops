@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}False Cases - Fraud Detection Audit{% endblock %}
+
+{% block content %}
+<div class="py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2><i class="bi bi-bug me-2"></i>False Cases Analysis</h2>
+            <p class="text-muted mb-0">Review model prediction errors</p>
+        </div>
+        <button class="btn btn-outline-primary" onclick="location.reload()">
+            <i class="bi bi-arrow-clockwise"></i>
+        </button>
+    </div>
+
+    <div class="row g-4">
+        <!-- False Positives -->
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header bg-warning text-dark">
+                    <h5 class="mb-0">
+                        <i class="bi bi-exclamation-triangle me-2"></i>
+                        False Positives ({{ false_positives|length }})
+                    </h5>
+                    <small>Predicted as fraud but actually legitimate</small>
+                </div>
+                <div class="card-body p-0">
+                    {% if false_positives %}
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Type</th>
+                                    <th>Amount</th>
+                                    <th>Probability</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for fp in false_positives %}
+                                <tr>
+                                    <td><code>{{ fp.id or fp.transaction_id }}</code></td>
+                                    <td><span class="badge bg-info">{{ fp.type }}</span></td>
+                                    <td class="amount-cell">${{ "%.2f"|format(fp.amount) }}</td>
+                                    <td>
+                                        <span class="badge bg-danger">{{ "%.2f"|format(fp.predict_proba) }}</span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="p-4 text-center text-muted">
+                        <i class="bi bi-check-circle fs-1"></i>
+                        <p class="mt-2 mb-0">No false positives found</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- False Negatives -->
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header bg-danger text-white">
+                    <h5 class="mb-0">
+                        <i class="bi bi-x-circle me-2"></i>
+                        False Negatives ({{ false_negatives|length }})
+                    </h5>
+                    <small>Predicted as legitimate but actually fraud</small>
+                </div>
+                <div class="card-body p-0">
+                    {% if false_negatives %}
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Type</th>
+                                    <th>Amount</th>
+                                    <th>Probability</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for fn in false_negatives %}
+                                <tr>
+                                    <td><code>{{ fn.id or fn.transaction_id }}</code></td>
+                                    <td><span class="badge bg-info">{{ fn.type }}</span></td>
+                                    <td class="amount-cell">${{ "%.2f"|format(fn.amount) }}</td>
+                                    <td>
+                                        <span class="badge bg-success">{{ "%.2f"|format(fn.predict_proba) }}</span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="p-4 text-center text-muted">
+                        <i class="bi bi-check-circle fs-1"></i>
+                        <p class="mt-2 mb-0">No false negatives found</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if not false_positives and not false_negatives %}
+    <div class="alert alert-info mt-4">
+        <i class="bi bi-info-circle me-2"></i>
+        <strong>No false cases found.</strong> This could mean:
+        <ul class="mb-0 mt-2">
+            <li>No predictions have been labeled yet (label some in <a href="{{ url_for('manual_labeling') }}">Manual Labeling</a>)</li>
+            <li>The model is performing perfectly on labeled data</li>
+        </ul>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
