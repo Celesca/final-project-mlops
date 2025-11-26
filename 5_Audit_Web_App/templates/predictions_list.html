@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - Fraud Detection Audit{% endblock %}
+
+{% block content %}
+<div class="py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>
+            {% if prediction_type == 'fraud' %}
+            <i class="bi bi-exclamation-triangle text-danger me-2"></i>
+            {% else %}
+            <i class="bi bi-check-circle text-success me-2"></i>
+            {% endif %}
+            {{ title }}
+        </h2>
+        <div>
+            <span class="badge bg-secondary fs-6">{{ predictions|length }} predictions</span>
+            <button class="btn btn-outline-primary ms-2" onclick="location.reload()">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+        </div>
+    </div>
+
+    {% if predictions %}
+    <div class="card">
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ID</th>
+                            <th>Type</th>
+                            <th>Amount</th>
+                            <th>Origin Account</th>
+                            <th>Destination Account</th>
+                            <th>Probability</th>
+                            <th>Prediction</th>
+                            <th>Actual Label</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in predictions %}
+                        <tr>
+                            <td><code>{{ p.id or p.transaction_id }}</code></td>
+                            <td>
+                                <span class="badge bg-info">{{ p.type }}</span>
+                            </td>
+                            <td class="amount-cell">${{ "%.2f"|format(p.amount) }}</td>
+                            <td>
+                                <small>{{ p.nameOrig }}</small><br>
+                                <span class="text-muted" style="font-size: 0.75rem;">
+                                    {{ "%.2f"|format(p.oldbalanceOrg) }} → {{ "%.2f"|format(p.newbalanceOrig) }}
+                                </span>
+                            </td>
+                            <td>
+                                <small>{{ p.nameDest }}</small><br>
+                                <span class="text-muted" style="font-size: 0.75rem;">
+                                    {{ "%.2f"|format(p.oldbalanceDest) }} → {{ "%.2f"|format(p.newbalanceDest) }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div class="progress flex-grow-1" style="height: 8px;">
+                                        <div class="progress-bar {% if p.predict_proba >= 0.5 %}bg-danger{% else %}bg-success{% endif %}" 
+                                             style="width: {{ (p.predict_proba * 100)|int }}%"></div>
+                                    </div>
+                                    <span class="ms-2 small">{{ "%.2f"|format(p.predict_proba) }}</span>
+                                </div>
+                            </td>
+                            <td>
+                                {% if p.prediction %}
+                                <span class="badge badge-fraud">FRAUD</span>
+                                {% else %}
+                                <span class="badge badge-legitimate">LEGIT</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if p.actual_label is not none %}
+                                    {% if p.actual_label %}
+                                    <span class="badge bg-danger">Fraud</span>
+                                    {% else %}
+                                    <span class="badge bg-success">Legit</span>
+                                    {% endif %}
+                                {% else %}
+                                <span class="badge badge-pending">Pending</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if p.actual_label is none %}
+                                <div class="btn-group btn-group-sm">
+                                    <form action="{{ url_for('label_transaction') }}" method="POST" class="d-inline">
+                                        <input type="hidden" name="prediction_id" value="{{ p.id or p.transaction_id }}">
+                                        <input type="hidden" name="manual_label" value="1">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm" title="Mark as Fraud">
+                                            <i class="bi bi-x-circle"></i>
+                                        </button>
+                                    </form>
+                                    <form action="{{ url_for('label_transaction') }}" method="POST" class="d-inline">
+                                        <input type="hidden" name="prediction_id" value="{{ p.id or p.transaction_id }}">
+                                        <input type="hidden" name="manual_label" value="0">
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="Mark as Legitimate">
+                                            <i class="bi bi-check-circle"></i>
+                                        </button>
+                                    </form>
+                                </div>
+                                {% else %}
+                                <span class="text-muted">Labeled</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle me-2"></i>No predictions found.
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
