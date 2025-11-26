@@ -6,6 +6,7 @@ import pandas as pd
 import joblib
 from sklearn.preprocessing import StandardScaler
 from enum import Enum as _Enum
+import logging
 
 from .schemas import TRANSAC_TYPE, ALLOWED_TRANSAC_TYPES
 
@@ -19,6 +20,8 @@ FEATURE_COLUMNS = [
 ]
 
 NUMERIC_FEATURES = ["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]
+
+logger = logging.getLogger(__name__)
 
 def parse_time_features(time_ind: str) -> Dict[str, Any]:
     try:
@@ -152,10 +155,49 @@ def prepare_feature_frame(
 
     scaler = artifacts.get("scaler")
     if scaler is not None:
-        num_cols = artifacts.get("numerical_cols", [])
-        num_cols = [c for c in num_cols if c in working.columns]
-        if num_cols:
-            working[num_cols] = scaler.transform(working[num_cols].astype(float))
+        expected_num_cols = list(artifacts.get("numerical_cols", []))
+
+        if not expected_num_cols:
+            logger.warning("No numerical_cols found in artifacts; skipping scaler transform")
+        else:
+            # Ensure the working frame has the same column names the scaler was fitted on.
+            # Support legacy and canonical numeric column names by attempting to map.
+            all_present = all(c in working.columns for c in expected_num_cols)
+
+            if not all_present:
+                # attempt mapping between legacy names and canonical names
+                legacy_map = {
+                    "src_bal": "oldbalanceOrg",
+                    "src_new_bal": "newbalanceOrig",
+                    "dst_bal": "oldbalanceDest",
+                    "dst_new_bal": "newbalanceDest",
+                }
+
+                # For each expected column not present, try to populate it from a mapped column
+                for expected in expected_num_cols:
+                    if expected in working.columns:
+                        continue
+                    # try direct canonical -> present
+                    mapped = legacy_map.get(expected)
+                    if mapped and mapped in working.columns:
+                        working[expected] = working[mapped]
+                        continue
+                    # try reverse mapping (expected is canonical but working has legacy)
+                    rev_map = {v: k for k, v in legacy_map.items()}
+                    mapped_rev = rev_map.get(expected)
+                    if mapped_rev and mapped_rev in working.columns:
+                        working[expected] = working[mapped_rev]
+
+                all_present = all(c in working.columns for c in expected_num_cols)
+
+            if all_present:
+                # Transform using the expected column order
+                working[expected_num_cols] = scaler.transform(working[expected_num_cols].astype(float))
+            else:
+                logger.warning(
+                    "Scaler transform skipped because not all expected numeric columns are present: %s",
+                    expected_num_cols,
+                )
     else:
         for col in working.columns:
             working[col] = pd.to_numeric(working[col], errors="coerce")
