@@ -21,6 +21,7 @@ from model_serving.schemas import (
     MasterTransaction,
 )
 
+
 app = FastAPI(
     title="Fraud Detection API",
     description="REST API for fraud model training and inference with MLflow tracking",
@@ -34,6 +35,19 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+# Try to import and mount the `model_serving.backend_query` app if present
+try:
+    from model_serving import backend_query
+
+    backend_app = getattr(backend_query, "app", None)
+    if backend_app is not None:
+        app.mount("/query", backend_app)
+        logger.info("Mounted model_serving.backend_query app at /query")
+    else:
+        logger.info("model_serving.backend_query found but no 'app' attribute present")
+except Exception:
+    logger.exception("Failed to import or mount model_serving.backend_query")
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "models"
