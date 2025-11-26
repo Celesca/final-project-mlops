@@ -277,19 +277,18 @@ def _evaluate_against_master(
 
 @app.get("/query/GET/predictions")
 def get_predictions(limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return all predictions from the predictions table.
+    """Return joined predictions from correct and incorrect prediction tables.
 
     Each record includes prediction metadata and cleaned `transaction_data`.
     """
     from dags.utils import database as db
     
-    # Get all predictions (both fraud and non-fraud)
-    frauds = db.get_incorrect_predictions(limit)  # prediction = 1
-    non_frauds = db.get_correct_predictions(limit)  # prediction = 0
+    correct = db.get_correct_predictions(limit)
+    incorrect = db.get_incorrect_predictions(limit)
 
     combined: List[Dict[str, Any]] = []
 
-    for r in frauds:
+    for r in correct:
         tx = _clean_transaction_data(r.get("transaction_data") or {})
         combined.append(
             {
@@ -297,15 +296,14 @@ def get_predictions(limit: Optional[int] = None) -> List[Dict[str, Any]]:
                 "transaction_id": r.get("transaction_id"),
                 "prediction": r.get("prediction"),
                 "actual_label": r.get("actual_label"),
-                "predict_proba": r.get("predict_proba"),
                 "prediction_time": r.get("prediction_time"),
                 "created_at": r.get("created_at"),
                 "transaction_data": tx,
-                "source": "fraud_prediction",
+                "source": "correct",
             }
         )
 
-    for r in non_frauds:
+    for r in incorrect:
         tx = _clean_transaction_data(r.get("transaction_data") or {})
         combined.append(
             {
@@ -317,7 +315,7 @@ def get_predictions(limit: Optional[int] = None) -> List[Dict[str, Any]]:
                 "prediction_time": r.get("prediction_time"),
                 "created_at": r.get("created_at"),
                 "transaction_data": tx,
-                "source": "non_fraud_prediction",
+                "source": "incorrect",
             }
         )
 
@@ -334,7 +332,7 @@ def get_non_frauds(limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     from dags.utils import database as db
     
-    correct = db.get_correct_predictions(limit)
+    correct = db.get_incorrect_predictions(limit)
     results: List[Dict[str, Any]] = []
     for r in correct:
         tx = _clean_transaction_data(r.get("transaction_data") or {})
@@ -379,25 +377,33 @@ def get_frauds(limit: Optional[int] = None) -> List[Dict[str, Any]]:
 def update_prediction_label(payload: UpdatePredictionRequest) -> Dict[str, int]:
     """Update the `actual_label` for a prediction record by `transaction_id`.
 
-    This updates the prediction record to confirm the actual fraud status.
+    This updates whichever table(s) contain the `transaction_id` (correct_predictions
+    and/or incorrect_predictions). It does not move records between tables.
     """
     from dags.utils import database as db
     
     tid = payload.transaction_id
     actual_int = 1 if payload.actual_label else 0
 
-    updated_count = 0
+    updated_correct = 0
+    updated_incorrect = 0
 
-    # Update the predictions table (incorrect_predictions is now the main predictions table)
+    # Use the context manager from database.py to run two updates in a single transaction
     with db.get_cursor(commit=True) as cur:
+        cur.execute(
+            "UPDATE correct_predictions SET actual_label = %s WHERE transaction_id = %s",
+            (actual_int, tid),
+        )
+        updated_correct = cur.rowcount
+
         cur.execute(
             "UPDATE incorrect_predictions SET actual_label = %s WHERE transaction_id = %s",
             (actual_int, tid),
         )
-        updated_count = cur.rowcount
+        updated_incorrect = cur.rowcount
 
-    if updated_count == 0:
+    if (updated_correct + updated_incorrect) == 0:
         raise HTTPException(status_code=404, detail=f"No prediction record found for transaction_id={tid}")
 
-    return {"updated_count": updated_count}
+    return {"updated_correct": updated_correct, "updated_incorrect": updated_incorrect}
 
